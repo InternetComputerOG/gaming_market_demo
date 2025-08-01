@@ -1,0 +1,75 @@
+```
+# Python
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+*.egg
+*.egg-info/
+dist
+build
+eggs
+parts
+var
+sdist
+develop-eggs
+.installed.cfg
+lib
+lib64
+
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# IDE and Editors
+.idea/
+.vscode/
+*.sublime*
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sql
+*.sqlite
+*.db
+
+# Caches
+*.cache
+pip-wheel-metadata/
+.pytest_cache/
+.coverage
+.tox/
+.nox/
+.mypy_cache/
+
+# Streamlit
+.streamlit/cache/
+
+# Matplotlib and other outputs
+*.png
+*.jpg
+*.pdf
+plots/
+exports/
+
+# Tests and coverage
+htmlcov/
+.coverage
+coverage.xml
+*,cover
+
+# Miscellaneous
+*.mo
+*.pot
+*.orig
+*.rej
+*.bak
+*.tmp
+```

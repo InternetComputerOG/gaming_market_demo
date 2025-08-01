@@ -1,0 +1,105 @@
+from typing_extensions import TypedDict
+from typing import List, Dict, Any
+
+class BinaryState(TypedDict):
+    outcome_i: int
+    V: float
+    subsidy: float
+    L: float
+    q_yes: float
+    q_no: float
+    virtual_yes: float
+    seigniorage: float
+    active: bool
+    lob_pools: Dict[str, Dict[str, Dict[int, Dict[str, Any]]]]  # 'YES'/'NO' -> 'buy'/'sell' -> tick: {'volume': float, 'shares': Dict[str, float]}
+
+class EngineState(TypedDict):
+    binaries: List[BinaryState]
+    pre_sum_yes: float
+
+def init_state(params: Dict[str, Any]) -> EngineState:
+    """
+    Initialize the engine state based on parameters.
+    """
+    n_outcomes = params['n_outcomes']
+    z = params['z']
+    gamma = params['gamma']
+    q0 = params['q0']
+    subsidy_init = z / n_outcomes
+    binaries = []
+    for i in range(n_outcomes):
+        binaries.append({
+            'outcome_i': i,
+            'V': 0.0,
+            'subsidy': subsidy_init,
+            'L': subsidy_init,
+            'q_yes': q0,
+            'q_no': q0,
+            'virtual_yes': 0.0,
+            'seigniorage': 0.0,
+            'active': True,
+            'lob_pools': {
+                'YES': {'buy': {}, 'sell': {}},
+                'NO': {'buy': {}, 'sell': {}}
+            }
+        })
+    pre_sum_yes = n_outcomes * (q0 / subsidy_init)
+    return {'binaries': binaries, 'pre_sum_yes': pre_sum_yes}
+
+def serialize_state(state: EngineState) -> Dict[str, Any]:
+    """
+    Serialize state to JSON-compatible dict, converting int keys to str.
+    """
+    serialized = state.copy()
+    for bin_ in serialized['binaries']:
+        for token in bin_['lob_pools']:
+            for side in bin_['lob_pools'][token]:
+                pool_dict = bin_['lob_pools'][token][side]
+                str_key_dict = {str(k): v for k, v in pool_dict.items()}
+                bin_['lob_pools'][token][side] = str_key_dict
+    return serialized
+
+def deserialize_state(json_dict: Dict[str, Any]) -> EngineState:
+    """
+    Deserialize from JSON dict, converting str keys to int.
+    """
+    state = json_dict.copy()
+    for bin_ in state['binaries']:
+        for token in bin_['lob_pools']:
+            for side in bin_['lob_pools'][token]:
+                str_dict = bin_['lob_pools'][token][side]
+                int_key_dict = {int(k): v for k, v in str_dict.items()}
+                bin_['lob_pools'][token][side] = int_key_dict
+    return state
+
+def get_binary(state: EngineState, outcome_i: int) -> BinaryState:
+    """
+    Get binary state for a specific outcome.
+    """
+    for bin_ in state['binaries']:
+        if bin_['outcome_i'] == outcome_i:
+            return bin_
+    raise ValueError(f"Outcome {outcome_i} not found")
+
+def get_p_yes(binary: BinaryState) -> float:
+    """
+    Compute p_yes for a binary.
+    """
+    return (binary['q_yes'] + binary['virtual_yes']) / binary['L']
+
+def get_p_no(binary: BinaryState) -> float:
+    """
+    Compute p_no for a binary.
+    """
+    return binary['q_no'] / binary['L']
+
+def update_subsidies(state: EngineState, params: Dict[str, Any]) -> None:
+    """
+    Update subsidies and L for all binaries.
+    """
+    z = params['z']
+    gamma = params['gamma']
+    n_outcomes = params['n_outcomes']
+    for bin_ in state['binaries']:
+        bin_['subsidy'] = max(0.0, z / n_outcomes - gamma * bin_['V'])
+        bin_['L'] = bin_['V'] + bin_['subsidy']

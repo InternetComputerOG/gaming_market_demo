@@ -1,0 +1,9 @@
+decimal
+matplotlib
+mpmath
+numpy
+pandas
+pytest
+streamlit
+supabase
+typing_extensions
