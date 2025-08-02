@@ -160,11 +160,27 @@ Proof of no rejection: System always has positive root; penalty adjusts X withou
 
 ### Cross-Matching Mechanics
 For binary i, a limit buy YES at tick T (USDC deposited) matches with limit sell NO at tick S if T + S ≈ 1 + overround adjustment (e.g., T ≥ 1 - S + f_match/2). On match:
-- Collateral from YES buyer (T * Δ) and NO seller (S * Δ, via tokens burned) backs minted tokens.
-- Fee: f_match * (T + S) * Δ / 2 to maker.
-- Update \( q_{\text{yes}_i} += \Delta \), \( q_{\text{no}_i} += \Delta \) (net supply increase balanced by collateral).
 
-Proof of solvency preservation: Matched collateral adds to V_i by (T + S - f_match) * Δ ≥ Δ (since T + S ≥1 via asymmetry), ensuring \( q_{\text{yes}_i} + q_{\text{no}_i} < 2 L_i \).
+**Limit Price Enforcement**: Users are guaranteed their specified limit prices:
+- YES buyer pays exactly T per token (their limit price)
+- NO seller receives exactly S per token (their limit price)
+- Trading fees are applied separately and transparently
+
+**Execution Details**:
+- YES buyer contributes: T * Δ (USDC at their limit price)
+- NO seller contributes: S * Δ (via tokens burned at their limit price)
+- Total system collateral: (T + S) * Δ
+- Fee: f_match * (T + S) * Δ / 2 (split between maker and taker)
+- Net collateral to V_i: (T + S) * Δ - fee = (T + S - f_match * (T + S) / 2) * Δ
+- Update \( q_{\text{yes}_i} += \Delta \), \( q_{\text{no}_i} += \Delta \)
+
+**User Experience**:
+- Limit orders execute at-or-better than specified prices
+- Fees are clearly separated from execution prices
+- No surprise pricing due to pooled collateral effects
+- Traditional limit order book expectations are preserved
+
+Proof of solvency preservation: Net collateral (T + S - f_match * (T + S) / 2) * Δ ≥ Δ when T + S ≥ 1 + f_match * (T + S) / 2, ensuring \( q_{\text{yes}_i} + q_{\text{no}_i} < 2 L_i \).
 
 ### Auto-Filling and Seigniorage
 On cross-impact (e.g., diversion ζ * X to L_j, dropping p_yes_j), for opt-in buy pools in j (ticks > new p_yes_j):
@@ -239,13 +255,21 @@ def buy_yes(i, Δ):
             pool_no = get_sell_pool(i, NO, comp_tick_no)
             if pool_no.volume >0 and tick_yes + comp_tick_no * tick_size >=1:
                 fill = min(Δ - matched_cross, pool_no.volume)
-                price_yes = tick_yes * tick_size
-                price_no = comp_tick_no * tick_size
-                cost_cross += fill * price_yes
+                price_yes = tick_yes * tick_size  # YES buyer's limit price
+                price_no = comp_tick_no * tick_size  # NO seller's limit price
+                
+                # True limit price enforcement: users pay/receive exactly their limit prices
+                cost_cross += fill * price_yes  # YES buyer pays their limit price
+                # NO seller receives their limit price (handled in pool settlement)
+                
                 matched_cross += fill
                 update_pool_fill(pool_no, fill, buy=False)  # Burn NO, mint YES
-                fee_cross = f_match * fill * (price_yes + price_no)
-                V_i += (price_yes + price_no - f_match) * fill
+                
+                # Fee calculation per TDD: f_match * (T + S) * Δ / 2 (split between sides)
+                fee_cross = f_match * fill * (price_yes + price_no) / 2
+                
+                # System collateral: total user contributions minus fee
+                V_i += (price_yes + price_no) * fill - fee_cross
 
     # LOB matching (batched per block)
     matched = 0
@@ -411,6 +435,33 @@ def resolution_round(round_num):
 - Market Creation: Add params mr_enabled, res_schedule, vc_enabled.
 - New: triggerResolutionRound(uint round_num)  # Callable by oracle/maker, executes above.
 - Redemption: Update to handle phased payouts.
+
+## Limit Order Pricing and User Experience
+
+### True Limit Price Enforcement
+The system implements **Option 1: True Limit Price Enforcement** where:
+- **YES buyers** pay exactly their limit price in USDC
+- **NO sellers** receive exactly their limit price in USDC  
+- **Trading fees** are applied separately and transparently
+- **Execution guarantee**: Orders execute at-or-better than specified limit prices
+
+### Fee Structure
+- Cross-matching fee: `f_match * (price_yes + price_no) * fill / 2`
+- Fee is **split between maker and taker** (each pays half)
+- Fees are **separate from limit prices**, maintaining traditional limit order expectations
+- Total system collateral: `(price_yes + price_no) * fill - fee`
+
+### User Experience Benefits
+1. **Predictable Costs**: Users know exactly what they'll pay/receive
+2. **Traditional Behavior**: Matches expectations from other limit order books
+3. **Transparent Fees**: Trading costs are clearly separated from execution prices
+4. **Fair Matching**: Overround creates house edge without double-charging users
+
+### Mathematical Properties
+- **Solvency Preserved**: System maintains `V_i ≥ 0` through proper fee accounting
+- **Overround Maintained**: `price_yes + price_no ≥ 1.00` creates gambling excitement
+- **Fee Revenue**: Split fees provide sustainable revenue model
+- **Arbitrage Bounds**: Cross-matching only occurs when profitable for both sides
 
 ## User Implications/Dynamics
 - **Fixed Payout Certainty**: Trades execute, 300 tokens pay $300 if correct; asymptotic warnings for extremes.

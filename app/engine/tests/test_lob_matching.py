@@ -146,9 +146,12 @@ def test_cross_match_binary(init_state: EngineState, default_params: EngineParam
     assert fill['size'] == Decimal('100')  # Min volume
     assert fill['price_yes'] == Decimal('0.50')
     assert fill['price_no'] == Decimal('0.60')
-    assert fill['fee'] == Decimal('0.005') * Decimal('100') * (Decimal('0.50') + Decimal('0.60'))  # f_match * size * (p_y + p_n)
+    assert fill['fee'] == Decimal('0.005') * Decimal('100') * (Decimal('0.50') + Decimal('0.60')) / Decimal('2')  # f_match * size * (p_y + p_n) / 2
     binary = get_binary(state, 1)
-    assert binary['V'] == (Decimal('0.50') + Decimal('0.60') - Decimal('0.005')) * Decimal('100')
+    # V increases by (price_yes + price_no) * fill - fee
+    fee = Decimal('0.005') * Decimal('100') * (Decimal('0.50') + Decimal('0.60')) / Decimal('2')
+    expected_v_increase = (Decimal('0.50') + Decimal('0.60')) * Decimal('100') - fee
+    assert abs(Decimal(str(binary['V'])) - expected_v_increase) < Decimal('0.001')  # Allow small precision difference
     assert binary['q_yes'] == default_params['q0'] + Decimal('100')
     assert binary['q_no'] == default_params['q0'] + Decimal('100')
     assert 50 not in binary['lob_pools']['YES']['buy']
@@ -177,7 +180,7 @@ def test_match_market_order(init_state: EngineState, default_params: EngineParam
 
     # Invariant check
     update_subsidies(state, default_params)
-    assert binary['q_yes'] + binary['q_no'] < Decimal('2') * binary['L']
+    assert Decimal(str(binary['q_yes'])) + Decimal(str(binary['q_no'])) < Decimal('2') * Decimal(str(binary['L']))
 
     # Zero size
     with pytest.raises(ValueError):

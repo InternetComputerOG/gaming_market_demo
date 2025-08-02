@@ -212,6 +212,6 @@ def test_auto_fill_invariants(default_params: EngineParams, initial_state: Engin
     diversion = Decimal('100')
     auto_fill(initial_state, 1, diversion, default_params)
     update_subsidies(initial_state, default_params)
-    assert binary['q_yes'] + binary['q_no'] < Decimal('2') * binary['L']
+    assert binary['q_yes'] + binary['q_no'] < Decimal('2') * Decimal(str(binary['L']))
     assert binary['seigniorage'] >= Decimal('0')
     assert get_effective_p_yes(binary) < default_params['p_max']
