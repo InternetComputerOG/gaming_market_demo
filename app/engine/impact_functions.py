@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Dict
+from typing import Dict, Optional
 from typing_extensions import TypedDict
 
 import numpy as np
@@ -22,7 +22,7 @@ def compute_dynamic_params(params: EngineParams, current_time: int, round_num: O
     t = Decimal(current_time) / Decimal(total_duration)
     if mr_enabled and interpolation_mode == 'reset' and round_num is not None:
         # Compute round start time from res_offsets and freeze_durs
-        if round_num > 0:
+        if round_num > 0 and len(params['res_offsets']) > round_num:
             round_start = sum(params['res_offsets'][:round_num]) + sum(params['freeze_durs'][:round_num])
             round_duration = params['res_offsets'][round_num]
             t = Decimal(current_time - round_start) / Decimal(round_duration)
@@ -34,7 +34,7 @@ def compute_dynamic_params(params: EngineParams, current_time: int, round_num: O
     zeta = Decimal(params['zeta_start']) + t * (Decimal(params['zeta_end']) - Decimal(params['zeta_start']))
 
     # Clamp zeta to safe range
-    max_zeta = safe_divide(Decimal(1), Decimal(params['num_binaries'] - 1))
+    max_zeta = safe_divide(Decimal(1), Decimal(params['n_outcomes'] - 1))
     zeta = min(max(zeta, Decimal(0)), max_zeta)
 
     return {'mu': mu, 'nu': nu, 'kappa': kappa, 'zeta': zeta}
@@ -80,25 +80,28 @@ def get_new_prices_after_impact(binary: BinaryState, delta: Decimal, X: Decimal,
     Uses effective supplies; assumes V/L updated post-impact.
     """
     sign = 1 if is_buy else -1
+    # Update liquidity with impact
+    new_l = Decimal(binary['L']) + sign * f_i * X
+    
     if is_yes:
         new_q_yes_eff = Decimal(binary['q_yes']) + Decimal(binary['virtual_yes']) + sign * delta
-        new_p_yes = safe_divide(new_q_yes_eff, Decimal(binary['L']))
-        new_p_no = get_effective_p_no(binary)
+        new_p_yes = safe_divide(new_q_yes_eff, new_l)
+        new_p_no = safe_divide(Decimal(binary['q_no']), new_l)
     else:
         new_q_no = Decimal(binary['q_no']) + sign * delta
-        new_p_no = safe_divide(new_q_no, Decimal(binary['L']))
-        new_p_yes = get_effective_p_yes(binary)
+        new_p_no = safe_divide(new_q_no, new_l)
+        new_p_yes = safe_divide(Decimal(binary['q_yes']) + Decimal(binary['virtual_yes']), new_l)
     return new_p_yes, new_p_no
 
 def apply_asymptotic_penalty(X: Decimal, p_prime: Decimal, p_base: Decimal, is_buy: bool, params: EngineParams) -> Decimal:
     """
-    Applies penalty if p' > p_max (buy) or p' < p_min (sell): X *= (p'/p_max)^eta or (p_min/p')^eta.
+    Applies penalty if p' > p_max (buy) or p' < p_min (sell): X *= (p'/p_max)^eta or (p'/p_min)^eta.
     """
     eta = Decimal(params['eta'])
     if is_buy and p_prime > Decimal(params['p_max']):
         ratio = safe_divide(p_prime, Decimal(params['p_max']))
         X *= ratio ** eta
     elif not is_buy and p_prime < Decimal(params['p_min']):
-        ratio = safe_divide(Decimal(params['p_min']), p_prime)
+        ratio = safe_divide(p_prime, Decimal(params['p_min']))
         X *= ratio ** eta
     return X

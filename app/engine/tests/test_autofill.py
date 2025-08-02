@@ -22,7 +22,7 @@ def default_params() -> EngineParams:
         'n_outcomes': 3,
         'z': Decimal('10000.0'),
         'gamma': Decimal('0.0001'),
-        'q0': Decimal('5000.0'),
+        'q0': Decimal('10000.0') / Decimal('3') / Decimal('2'),  # (Z/N)/2 per TDD
         'f': Decimal('0.01'),
         'p_max': Decimal('0.99'),
         'p_min': Decimal('0.01'),
@@ -72,6 +72,7 @@ def initial_state(default_params: EngineParams) -> EngineState:
             'q_yes': q0,
             'q_no': q0,
             'virtual_yes': Decimal('0'),
+            'virtual_no': Decimal('0'),
             'seigniorage': Decimal('0'),
             'active': True,
             'lob_pools': {
@@ -109,17 +110,21 @@ def test_binary_search_max_delta_buy_yes(default_params: EngineParams, sample_bi
     assert delta > Decimal('0')
     assert validate_size(delta) is None
     cost = buy_cost_yes(sample_binary, delta, default_params, f_i)
-    p_after = get_effective_p_yes(sample_binary)  # Simulate
+    # Simulate the price after the trade
+    from app.engine.amm_math import get_new_p_yes_after_buy
+    p_after = get_new_p_yes_after_buy(sample_binary, delta, cost, f_i)
     assert p_after <= pool_tick
 
 def test_binary_search_max_delta_sell_yes(default_params: EngineParams, sample_binary: BinaryState):
-    pool_tick = Decimal('0.40')
+    pool_tick = Decimal('0.80')
     f_i = compute_f_i(default_params, default_params['zeta_start'], {'binaries': [sample_binary] * 3})
     max_high = Decimal('10000')
     delta = binary_search_max_delta(pool_tick, False, True, sample_binary, default_params, f_i, max_high)
     assert delta > Decimal('0')
     received = sell_received_yes(sample_binary, delta, default_params, f_i)
-    p_after = get_effective_p_yes(sample_binary)  # Simulate
+    # Simulate the price after the trade
+    from app.engine.amm_math import get_new_p_yes_after_sell
+    p_after = get_new_p_yes_after_sell(sample_binary, delta, received, f_i)
     assert p_after >= pool_tick
 
 def test_update_pool_and_get_deltas():
@@ -145,7 +150,8 @@ def test_apply_rebates():
     assert balance_deltas['user2'] == Decimal('20')
 
 def test_auto_fill_buy_diversion(default_params: EngineParams, initial_state: EngineState):
-    binary = get_binary(initial_state, 1)
+    # Use the binary at index 1 (same as auto_fill will use)
+    binary = initial_state['binaries'][1]
     add_sample_pools(binary, True, True, 60, Decimal('1000'), {'user1': Decimal('1000')})  # Tick 0.60 buy YES
     diversion = Decimal('100')
     total_surplus, events = auto_fill(initial_state, 1, diversion, default_params)

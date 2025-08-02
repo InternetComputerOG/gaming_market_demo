@@ -83,7 +83,9 @@ def test_compute_dynamic_params_reset_mode(default_params: EngineParams):
     params['res_schedule'] = [1, 1]
     # Assume uniform rounds, total_duration / (len(res_schedule)+1)
     per_round_dur = params['total_duration'] // (len(params['res_schedule']) + 1)
-    dyn = compute_dynamic_params(params, 600, round_num=1)  # t=600 in round 1, fraction=600/1200=0.5 if 3 rounds
+    params['res_offsets'] = [per_round_dur, per_round_dur, per_round_dur]  # 3 rounds of 1200 each
+    params['freeze_durs'] = [0, 0, 0]  # No freeze periods
+    dyn = compute_dynamic_params(params, 1800, round_num=1)  # t=1800 in round 1, fraction=600/1200=0.5 if 3 rounds
     # But since logic approximates, test mid
     assert dyn['mu'] == Decimal('1.5')
 
@@ -108,9 +110,12 @@ def test_apply_own_impact_buy_yes(initial_state: EngineState, default_params: En
     f_i = Decimal('0.8')
     apply_own_impact(state, 0, X, is_buy=True, is_yes=True, f_i=f_i, params=default_params)
     binary = get_binary(state, 0)
-    assert binary['V'] == initial_v + f_i * X
+    assert Decimal(str(binary['V'])) == Decimal(str(initial_v)) + f_i * X
     update_subsidies(state, default_params)
-    assert binary['subsidy'] == max(Decimal(0), default_params['z'] / Decimal(default_params['n_outcomes']) - default_params['gamma'] * binary['V'])
+    expected_subsidy = max(Decimal(0), default_params['z'] / Decimal(default_params['n_outcomes']) - default_params['gamma'] * Decimal(str(binary['V'])))
+    actual_subsidy = Decimal(str(binary['subsidy']))
+    # Allow for small precision differences due to float conversion
+    assert abs(actual_subsidy - expected_subsidy) < Decimal('1e-10')
     assert binary['L'] == binary['V'] + binary['subsidy']
 
 def test_apply_own_impact_sell_no(initial_state: EngineState, default_params: EngineParams):
@@ -121,7 +126,7 @@ def test_apply_own_impact_sell_no(initial_state: EngineState, default_params: En
     f_i = Decimal('0.8')
     apply_own_impact(state, 0, X, is_buy=False, is_yes=False, f_i=f_i, params=default_params)
     binary = get_binary(state, 0)
-    assert binary['V'] == initial_v - f_i * X
+    assert Decimal(str(binary['V'])) == Decimal(str(initial_v)) - f_i * X
 
 def test_apply_cross_impacts_buy(initial_state: EngineState, default_params: EngineParams):
     state = initial_state.copy()
@@ -130,7 +135,7 @@ def test_apply_cross_impacts_buy(initial_state: EngineState, default_params: Eng
     zeta = Decimal('0.1')
     apply_cross_impacts(state, 0, X, is_buy=True, zeta=zeta, params=default_params)
     for j in range(1, 3):
-        assert state['binaries'][j]['V'] == initial_vs[j] + zeta * X
+        assert Decimal(str(state['binaries'][j]['V'])) == Decimal(str(initial_vs[j])) + zeta * X
     assert state['binaries'][0]['V'] == initial_vs[0]  # No self
 
 def test_apply_cross_impacts_sell_inactive(initial_state: EngineState, default_params: EngineParams):
@@ -140,7 +145,7 @@ def test_apply_cross_impacts_sell_inactive(initial_state: EngineState, default_p
     X = Decimal('100.0')
     zeta = Decimal('0.1')
     apply_cross_impacts(state, 0, X, is_buy=False, zeta=zeta, params=default_params)
-    assert state['binaries'][1]['V'] == initial_vs[1] - zeta * X
+    assert Decimal(str(state['binaries'][1]['V'])) == Decimal(str(initial_vs[1])) - zeta * X
     assert state['binaries'][2]['V'] == initial_vs[2]  # Inactive ignored
 
 def test_get_new_prices_after_impact_buy_yes(initial_state: EngineState, default_params: EngineParams):
@@ -149,10 +154,10 @@ def test_get_new_prices_after_impact_buy_yes(initial_state: EngineState, default
     X = Decimal('50.0')
     f_i = Decimal('0.8')
     new_p_yes, new_p_no = get_new_prices_after_impact(binary, delta, X, f_i, is_buy=True, is_yes=True)
-    eff_delta = delta + binary['virtual_yes']  # But initial 0
+    eff_delta = delta + Decimal(str(binary['virtual_yes']))  # But initial 0
     new_l = binary['L'] + f_i * X
-    assert new_p_yes == safe_divide(binary['q_yes'] + delta + binary['virtual_yes'], new_l)
-    assert new_p_no == safe_divide(binary['q_no'], new_l)
+    assert new_p_yes == safe_divide(Decimal(str(binary['q_yes'])) + delta + Decimal(str(binary['virtual_yes'])), new_l)
+    assert new_p_no == safe_divide(Decimal(str(binary['q_no'])), new_l)
 
 def test_get_new_prices_after_impact_sell_no_virtual(initial_state: EngineState, default_params: EngineParams):
     binary = get_binary(initial_state, 0).copy()
@@ -162,8 +167,8 @@ def test_get_new_prices_after_impact_sell_no_virtual(initial_state: EngineState,
     f_i = Decimal('0.8')
     new_p_yes, new_p_no = get_new_prices_after_impact(binary, delta, X, f_i, is_buy=False, is_yes=False)
     new_l = binary['L'] - f_i * X
-    assert new_p_yes == safe_divide(binary['q_yes'] + binary['virtual_yes'], new_l)
-    assert new_p_no == safe_divide(binary['q_no'] - delta, new_l)
+    assert new_p_yes == safe_divide(Decimal(str(binary['q_yes'])) + Decimal(str(binary['virtual_yes'])), new_l)
+    assert new_p_no == safe_divide(Decimal(str(binary['q_no'])) - delta, new_l)
 
 def test_apply_asymptotic_penalty_buy_overflow(default_params: EngineParams):
     X = Decimal('100.0')
@@ -177,7 +182,7 @@ def test_apply_asymptotic_penalty_sell_underflow(default_params: EngineParams):
     X = Decimal('100.0')
     p_prime = Decimal('0.005')
     new_x = apply_asymptotic_penalty(X, p_prime, default_params['p_min'], is_buy=False, params=default_params)
-    assert new_x == X * (default_params['p_min'] / p_prime) ** default_params['eta']
+    assert new_x == X * (p_prime / default_params['p_min']) ** default_params['eta']
     assert new_x < X
 
 def test_apply_asymptotic_penalty_no_penalty(default_params: EngineParams):

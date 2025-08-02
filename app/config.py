@@ -61,7 +61,7 @@ def get_default_engine_params() -> EngineParams:
         outcome_names=["Outcome A", "Outcome B", "Outcome C"],
         z=10000.0,
         gamma=0.0001,
-        q0=5000.0,
+        q0=10000.0/6,  # (z/n_outcomes)/2 = (10000/3)/2 = 10000/6 to ensure p_yes = p_no = 0.5
         f=0.01,
         p_max=0.99,
         p_min=0.01,

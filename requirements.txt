@@ -1,4 +1,3 @@
-decimal
 matplotlib
 mpmath
 numpy

@@ -17,7 +17,7 @@ if 'user_id' not in st.session_state:
     if st.button("Join"):
         config = load_config()
         user_id = str(uuid4())
-        insert_user(user_id, display_name, float(config['starting_balance']))
+        insert_user(user_id, display_name, float(config['params']['starting_balance']))
         st.session_state['user_id'] = user_id
         st.session_state['display_name'] = display_name
         st.session_state['last_tick'] = 0

@@ -1,5 +1,6 @@
 from typing_extensions import TypedDict
 from typing import List, Dict, Any
+from decimal import Decimal
 
 class BinaryState(TypedDict):
     outcome_i: int
@@ -79,19 +80,19 @@ def get_binary(state: EngineState, outcome_i: int) -> BinaryState:
     for bin_ in state['binaries']:
         if bin_['outcome_i'] == outcome_i:
             return bin_
-    raise ValueError(f"Outcome {outcome_i} not found")
+    raise ValueError(f"Binary not found for outcome {outcome_i}")
 
 def get_p_yes(binary: BinaryState) -> float:
     """
     Compute p_yes for a binary.
     """
-    return (binary['q_yes'] + binary['virtual_yes']) / binary['L']
+    return float((Decimal(str(binary['q_yes'])) + Decimal(str(binary['virtual_yes']))) / Decimal(str(binary['L'])))
 
 def get_p_no(binary: BinaryState) -> float:
     """
     Compute p_no for a binary.
     """
-    return binary['q_no'] / binary['L']
+    return float(Decimal(str(binary['q_no'])) / Decimal(str(binary['L'])))
 
 def update_subsidies(state: EngineState, params: Dict[str, Any]) -> None:
     """
@@ -101,5 +102,5 @@ def update_subsidies(state: EngineState, params: Dict[str, Any]) -> None:
     gamma = params['gamma']
     n_outcomes = params['n_outcomes']
     for bin_ in state['binaries']:
-        bin_['subsidy'] = max(0.0, z / n_outcomes - gamma * bin_['V'])
-        bin_['L'] = bin_['V'] + bin_['subsidy']
+        bin_['subsidy'] = float(max(Decimal('0.0'), Decimal(str(z)) / Decimal(str(n_outcomes)) - Decimal(str(gamma)) * Decimal(str(bin_['V']))))
+        bin_['L'] = float(Decimal(str(bin_['V'])) + Decimal(str(bin_['subsidy'])))

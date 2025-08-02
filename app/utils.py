@@ -59,15 +59,24 @@ def deserialize_state(json_str: str) -> Dict[str, Any]:
 def decimal_sqrt(d: Decimal) -> Decimal:
     if d < Decimal(0):
         raise ValueError("Cannot take square root of negative value.")
-    return Decimal(mp.sqrt(mp.mpf(str(d))))
+    return Decimal(str(mp.sqrt(mp.mpf(str(d)))))
 
 def solve_quadratic(a: Decimal, b: Decimal, c: Decimal) -> Decimal:
     disc = b**2 - 4 * a * c
     if disc < Decimal(0):
         raise ValueError("Negative discriminant in quadratic equation.")
     sqrt_disc = decimal_sqrt(disc)
-    # Assume positive root as per TDD usage
-    return (-b + sqrt_disc) / (2 * a)
+    
+    # Calculate both roots
+    root1 = (-b + sqrt_disc) / (2 * a)
+    root2 = (-b - sqrt_disc) / (2 * a)
+    
+    # Return minimum positive root as per TDD requirement
+    positive_roots = [r for r in [root1, root2] if r > Decimal(0)]
+    if not positive_roots:
+        raise ValueError("No positive roots found in quadratic equation.")
+    
+    return min(positive_roots)
 
 def safe_divide(num: Decimal, den: Decimal) -> Decimal:
     if den == Decimal(0):

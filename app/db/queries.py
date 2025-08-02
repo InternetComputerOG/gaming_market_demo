@@ -21,7 +21,7 @@ def get_db() -> Client:
 # Config queries
 def load_config() -> Dict[str, Any]:
     db = get_db()
-    result = db.table('config').select('*').eq('id', 1).execute()
+    result = db.table('config').select('*').limit(1).execute()
     if result.data:
         config = result.data[0]
         config['params'] = config.get('params', {})  # JSONB
@@ -30,16 +30,41 @@ def load_config() -> Dict[str, Any]:
 
 def update_config(params: Dict[str, Any]) -> None:
     db = get_db()
-    db.table('config').update({'params': params}).eq('id', 1).execute()
+    # Try to update existing config, or insert if none exists
+    existing = db.table('config').select('config_id').limit(1).execute()
+    if existing.data:
+        # Update existing config
+        config_id = existing.data[0]['config_id']
+        db.table('config').update({'params': params}).eq('config_id', config_id).execute()
+    else:
+        # Insert new config
+        db.table('config').insert({'params': params}).execute()
+
+def get_current_config() -> Dict[str, Any]:
+    """Alias for load_config for compatibility"""
+    return load_config()
 
 # Users queries
-def insert_user(user_id: str, username: str, balance: float) -> None:
+def insert_user(user_id: str, display_name: str, balance: float) -> None:
     db = get_db()
     db.table('users').insert({
         'user_id': user_id,
-        'username': username,
+        'display_name': display_name,
         'balance': balance
     }).execute()
+
+def fetch_user_balance(user_id: str) -> float:
+    """Fetch the current balance for a user"""
+    db = get_db()
+    result = db.table('users').select('balance').eq('user_id', user_id).execute()
+    if result.data:
+        return float(result.data[0]['balance'])
+    return 0.0
+
+def update_user_balance(user_id: str, new_balance: float) -> None:
+    """Update a user's balance"""
+    db = get_db()
+    db.table('users').update({'balance': new_balance}).eq('user_id', user_id).execute()
 
 def fetch_users() -> List[Dict[str, Any]]:
     db = get_db()
@@ -71,7 +96,15 @@ def insert_order(order: Dict[str, Any]) -> str:
 
 def fetch_open_orders(binary_id: int) -> List[Dict[str, Any]]:
     db = get_db()
-    return db.table('orders').select('*').eq('binary_id', binary_id).eq('status', 'open').order('ts_ms').execute().data
+    return db.table('orders').select('*').eq('binary_id', binary_id).eq('status', 'OPEN').execute().data
+
+def fetch_user_orders(user_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Fetch orders for a specific user, optionally filtered by status"""
+    db = get_db()
+    query = db.table('orders').select('*').eq('user_id', user_id)
+    if status:
+        query = query.eq('status', status)
+    return query.execute().data
 
 def update_order_status(order_id: str, status: str, filled_qty: Optional[float] = None) -> None:
     db = get_db()

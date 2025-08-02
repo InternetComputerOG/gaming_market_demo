@@ -9,28 +9,114 @@ from .impact_functions import get_new_prices_after_impact
 
 AutoFillEvent = Dict[str, any]  # {'type': 'auto_fill_buy' or 'auto_fill_sell', 'binary_id': int, 'is_yes': bool, 'tick': int, 'delta': Decimal, 'surplus': Decimal, 'user_position_deltas': Dict[str, Decimal], 'user_balance_deltas': Dict[str, Decimal]}
 
+def trigger_auto_fills(state: EngineState, i: int, X: Decimal, is_buy: bool, params: EngineParams, current_time: int) -> List[AutoFillEvent]:
+    """
+    Trigger auto-fills on cross-impacts after an order execution.
+    
+    Args:
+        state: Current engine state
+        i: Binary index where the order was executed
+        X: Amount of the order (USDC cost/received)
+        is_buy: Whether the order was a buy
+        params: Engine parameters
+        current_time: Current timestamp
+        
+    Returns:
+        List of auto-fill events
+    """
+    if not params.get('af_enabled', False):
+        return []
+    
+    all_events = []
+    
+    # Calculate diversions for other active binaries due to cross-impacts
+    # This is a simplified implementation - in practice, this would use
+    # the impact functions to calculate proper diversions
+    active_binaries = [j for j, binary in enumerate(state['binaries']) if binary.get('active', True)]
+    
+    for j in active_binaries:
+        if j == i:  # Skip the binary where the order was executed
+            continue
+            
+        # Calculate diversion based on cross-impact
+        # This is a simplified calculation - the actual implementation would
+        # use the impact functions to determine the proper diversion amount
+        zeta = params.get('zeta', Decimal('0.1'))
+        n_active = len(active_binaries)
+        
+        if n_active > 1:
+            # Simple cross-impact calculation
+            diversion = X * zeta / (n_active - 1)
+            if not is_buy:
+                diversion = -diversion
+                
+            # Trigger auto-fill for this binary
+            surplus, events = auto_fill(state, j, diversion, params)
+            all_events.extend(events)
+    
+    return all_events
+
 def binary_search_max_delta(pool_tick: Decimal, is_buy: bool, is_yes: bool, binary: BinaryState, params: EngineParams, f_i: Decimal, max_high: Decimal) -> Decimal:
     low = Decimal('0')
     high = max_high
-    for _ in range(20):
+    
+
+    
+    # Handle edge cases
+    if max_high <= Decimal('0'):
+        return Decimal('0')
+    
+    best_delta = Decimal('0')
+    
+    for iteration in range(20):
         mid = (low + high) / Decimal('2')
         if mid <= Decimal('0'):
-            return Decimal('0')
-        if is_buy:
-            X_mid = buy_cost_yes(binary, mid, params, f_i) if is_yes else buy_cost_no(binary, mid, params, f_i)
-            p_mid = get_new_p_yes_after_buy(binary, mid, X_mid, f_i) if is_yes else get_new_p_no_after_buy(binary, mid, X_mid, f_i)
-            if p_mid <= pool_tick:
-                low = mid
+            break
+        
+        try:
+            if is_buy:
+                X_mid = buy_cost_yes(binary, mid, params, f_i) if is_yes else buy_cost_no(binary, mid, params, f_i)
+                p_mid = get_new_p_yes_after_buy(binary, mid, X_mid, f_i) if is_yes else get_new_p_no_after_buy(binary, mid, X_mid, f_i)
+                charge_mid = pool_tick * mid
+                surplus_mid = charge_mid - X_mid
+                
+                # Check both constraints: price and profitability
+                price_ok = p_mid <= pool_tick
+                profit_ok = surplus_mid >= Decimal('0')
+                
+                if price_ok and profit_ok:
+                    best_delta = mid
+                    low = mid
+                    print(f"DEBUG: Both constraints satisfied, setting low = {low}, best_delta = {best_delta}")
+                else:
+                    high = mid
+
             else:
-                high = mid
-        else:
-            X_mid = sell_received_yes(binary, mid, params, f_i) if is_yes else sell_received_no(binary, mid, params, f_i)
-            p_mid = get_new_p_yes_after_sell(binary, mid, X_mid, f_i) if is_yes else get_new_p_no_after_sell(binary, mid, X_mid, f_i)
-            if p_mid >= pool_tick:
-                low = mid
-            else:
-                high = mid
-    return low
+                X_mid = sell_received_yes(binary, mid, params, f_i) if is_yes else sell_received_no(binary, mid, params, f_i)
+                p_mid = get_new_p_yes_after_sell(binary, mid, X_mid, f_i) if is_yes else get_new_p_no_after_sell(binary, mid, X_mid, f_i)
+                charge_mid = pool_tick * mid
+                surplus_mid = X_mid - charge_mid  # For sells, we receive X_mid and pay charge_mid
+                
+                print(f"DEBUG: Iteration {iteration}: mid={mid}, X_mid={X_mid}, p_mid={p_mid}, charge={charge_mid}, surplus={surplus_mid}")
+                
+                # Check both constraints: price and profitability
+                price_ok = p_mid >= pool_tick
+                profit_ok = surplus_mid >= Decimal('0')
+                
+                if price_ok and profit_ok:
+                    best_delta = mid
+                    low = mid
+                    print(f"DEBUG: Both constraints satisfied, setting low = {low}, best_delta = {best_delta}")
+                else:
+                    high = mid
+
+        except (ValueError, ZeroDivisionError):
+            # If we hit numerical issues, reduce the search space
+            high = mid
+
+            
+
+    return best_delta
 
 def update_pool_and_get_deltas(pool: Dict[str, any], delta: Decimal, charge: Decimal, is_buy: bool) -> Tuple[Dict[str, Decimal], Dict[str, Decimal]]:
     original_volume = Decimal(str(pool['volume']))
@@ -38,17 +124,30 @@ def update_pool_and_get_deltas(pool: Dict[str, any], delta: Decimal, charge: Dec
     balance_deltas = {}  # For sells: + charge pro-rata; for buys: 0 here, rebates separate
     if original_volume <= Decimal('0'):
         return position_deltas, balance_deltas
+    
     for user_id, share in list(pool['shares'].items()):
-        pro_rata = safe_divide(Decimal(str(share)), original_volume) * (charge if is_buy else delta)
+        user_share = Decimal(str(share))
+        pro_rata_fraction = safe_divide(user_share, original_volume)
+        
         if is_buy:
-            position_deltas[user_id] = pro_rata  # Tokens received
+            # For buys: users get tokens (delta) pro-rata, pay USDC (charge) pro-rata
+            position_deltas[user_id] = pro_rata_fraction * delta  # Tokens received
+            balance_deltas[user_id] = -(pro_rata_fraction * charge)  # USDC paid (negative)
+            # Reduce user's share by their pro-rata portion of the delta
+            pool['shares'][user_id] = user_share - (pro_rata_fraction * delta)
         else:
-            position_deltas[user_id] = -pro_rata  # Tokens sold
-            balance_deltas[user_id] = pro_rata  # USDC received at tick * pro_rata_delta
-        pool['shares'][user_id] = Decimal(str(pool['shares'][user_id])) - pro_rata if is_buy else Decimal(str(pool['shares'][user_id])) - (safe_divide(Decimal(str(share)), original_volume) * delta)
+            # For sells: users provide tokens (delta), get USDC (charge)
+            position_deltas[user_id] = -(pro_rata_fraction * delta)  # Tokens sold (negative)
+            balance_deltas[user_id] = pro_rata_fraction * charge  # USDC received (positive)
+            # Reduce user's share by their pro-rata portion of the delta
+            pool['shares'][user_id] = user_share - (pro_rata_fraction * delta)
+        
         if pool['shares'][user_id] <= Decimal('0'):
             del pool['shares'][user_id]
-    pool['volume'] = Decimal(str(pool['volume'])) - charge if is_buy else Decimal(str(pool['volume'])) - delta
+    
+    # Update pool volume: reduce by delta for both buys and sells
+    pool['volume'] = original_volume - delta
+    
     return position_deltas, balance_deltas
 
 def apply_rebates(surplus: Decimal, sigma: Decimal, original_volume: Decimal, shares: Dict[str, Decimal], balance_deltas: Dict[str, Decimal]) -> None:
@@ -66,16 +165,27 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
     binary = state['binaries'][j]
     if not binary['active'] or not params['af_enabled'] or diversion == Decimal('0'):
         return Decimal('0'), []
-    f_j = Decimal('1') - (len([b for b in state['binaries'] if b['active']]) - 1) * params['zeta']
+    
+    # Apply diversion to binary state first (this changes V, L, and prices)
+    if diversion != Decimal('0'):
+        binary['V'] = float(Decimal(str(binary['V'])) + diversion)
+        update_subsidies(state, params)
+        print(f"DEBUG: After diversion - V={binary['V']}, L={binary['L']}, p_yes={get_p_yes(binary)}, p_no={get_p_no(binary)}")
+    
+    f_j = Decimal('1') - (len([b for b in state['binaries'] if b['active']]) - 1) * params['zeta_start']
     total_surplus = Decimal('0')
     events = []
     is_increase = diversion > Decimal('0')
     direction = 'buy' if is_increase else 'sell'
     yes_no_list = ['YES', 'NO']
     pools_filled = 0
+    
+    print(f"DEBUG: Auto-fill starting - diversion={diversion}, is_increase={is_increase}, direction={direction}")
+    print(f"DEBUG: Binary {j} lob_pools structure: {binary['lob_pools']}")
     for yes_no in yes_no_list:
         pools = binary['lob_pools'][yes_no][direction]
         sorted_ticks = sorted(pools.keys(), reverse=is_increase)  # Desc for buy (high tick first), asc for sell (low first)
+        print(f"DEBUG: Checking {yes_no} {direction} pools: {sorted_ticks}")
         for tick_int in sorted_ticks:
             if pools_filled >= params['af_max_pools']:
                 break
@@ -84,32 +194,72 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 continue
             pool_tick = price_value(Decimal(tick_int) * params['tick_size'])
             current_p = get_p_yes(binary) if yes_no == 'YES' else get_p_no(binary)
+            print(f"DEBUG: tick_int={tick_int}, pool_tick={pool_tick}, current_p={current_p}, is_increase={is_increase}")
             if (is_increase and pool_tick <= current_p) or (not is_increase and pool_tick >= current_p):
+                print(f"DEBUG: Skipping pool - condition failed")
                 continue
-            max_high = usdc_amount(Decimal(str(pool['volume'])) / pool_tick) if is_increase else Decimal(str(pool['volume']))
+            print(f"DEBUG: Pool should be filled!")
+            # For buys, find max delta such that cost <= pool volume
+            # For sells, max delta is limited by pool volume directly
+            if is_increase:
+                # Binary search to find max delta where cost <= pool volume
+                pool_volume = Decimal(str(pool['volume']))
+                low_search, high_search = Decimal('0'), pool_volume  # Start with reasonable bounds
+                for _ in range(10):
+                    mid_search = (low_search + high_search) / Decimal('2')
+                    try:
+                        cost_mid = buy_cost_yes(binary, mid_search, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, mid_search, params, f_j)
+                        if cost_mid <= pool_volume:
+                            low_search = mid_search
+                        else:
+                            high_search = mid_search
+                    except:
+                        high_search = mid_search
+                max_high = low_search
+            else:
+                max_high = Decimal(str(pool['volume']))
+            print(f"DEBUG: max_high = {max_high}")
             delta = binary_search_max_delta(pool_tick, is_increase, yes_no == 'YES', binary, params, f_j, max_high)
-            validate_size(delta)
+            print(f"DEBUG: binary_search_max_delta returned delta = {delta}")
+            
+            # Debug: check if smaller deltas would be profitable
+            for test_delta in [Decimal('10'), Decimal('50'), Decimal('100')]:
+                if test_delta <= max_high:
+                    test_cost = buy_cost_yes(binary, test_delta, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, test_delta, params, f_j)
+                    test_charge = pool_tick * test_delta
+                    test_surplus = test_charge - test_cost
+                    print(f"DEBUG: test_delta={test_delta}, cost={test_cost}, charge={test_charge}, surplus={test_surplus}")
+            
             if delta <= Decimal('0'):
+                print(f"DEBUG: Delta <= 0, skipping")
                 continue
             if is_increase:
                 X = buy_cost_yes(binary, delta, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j)
-                charge = pool_tick * delta
-                surplus = charge - X
+                charge = usdc_amount(pool_tick * delta)
+                print(f"DEBUG: Buy - X={X}, charge={charge}")
             else:
                 X = sell_received_yes(binary, delta, params, f_j) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j)
-                charge = pool_tick * delta
-                surplus = X - charge
+                charge = usdc_amount(delta * (Decimal('1') - pool_tick))
+                print(f"DEBUG: Sell - X={X}, charge={charge}")
+            surplus = charge - X
+            print(f"DEBUG: surplus = {surplus}")
             if surplus <= Decimal('0'):
                 continue
+            
+            # Apply caps
             cap_delta = (params['af_cap_frac'] * abs(diversion)) / pool_tick
             if delta > cap_delta:
                 delta = cap_delta
+                # Recalculate with capped delta
                 if is_increase:
                     X = buy_cost_yes(binary, delta, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j)
-                    surplus = pool_tick * delta - X
+                    charge = pool_tick * delta
+                    surplus = charge - X
                 else:
                     X = sell_received_yes(binary, delta, params, f_j) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j)
-                    surplus = X - pool_tick * delta
+                    charge = pool_tick * delta
+                    surplus = X - charge
+            
             if surplus <= Decimal('0'):
                 continue
             original_volume = Decimal(str(pool['volume']))
@@ -120,12 +270,12 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             else:
                 binary['q_yes' if yes_no == 'YES' else 'q_no'] -= delta
             system_surplus = params['sigma'] * surplus
-            binary['V'] += system_surplus
+            binary['V'] += float(system_surplus)
             update_subsidies(state, params)
             apply_rebates(surplus, params['sigma'], original_volume, original_shares, balance_deltas)
             total_surplus += surplus
             events.append({
-                'type': 'auto_fill_buy' if is_increase else 'auto_fill_sell',
+                'type': 'auto_fill',
                 'binary_id': j,
                 'is_yes': yes_no == 'YES',
                 'tick': tick_int,
@@ -135,6 +285,6 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 'user_balance_deltas': balance_deltas
             })
             pools_filled += 1
-    if total_surplus > params['af_max_surplus'] * (abs(diversion) / params['zeta']):
-        total_surplus = params['af_max_surplus'] * (abs(diversion) / params['zeta'])
+    if total_surplus > params['af_max_surplus'] * (abs(diversion) / params['zeta_start']):
+        total_surplus = params['af_max_surplus'] * (abs(diversion) / params['zeta_start'])
     return total_surplus, events
