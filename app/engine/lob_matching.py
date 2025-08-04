@@ -29,6 +29,7 @@ def add_to_lob_pool(
     user_id: str,
     amount: Decimal,
     af_opt_in: bool,
+    tick_size: Decimal = None,
 ) -> None:
     validate_size(amount)
     binary = get_binary(state, i)
@@ -37,9 +38,19 @@ def add_to_lob_pool(
     if not binary['active']:
         raise ValueError(f"Binary {i} is not active")
     
-    # Validate tick (must be > 0 for valid prices)
-    if tick <= 0:
-        raise ValueError(f"Invalid tick {tick}, must be > 0")
+    # Validate tick bounds per TDD: prices must be in [p_min, p_max]
+    # Only validate if params are available in state (for backward compatibility)
+    if 'params' in state:
+        params = state['params']
+        min_tick = int(params['p_min'] / params['tick_size'])
+        max_tick = int(params['p_max'] / params['tick_size'])
+        if tick < min_tick or tick > max_tick:
+            price = Decimal(tick) * params['tick_size']
+            raise ValueError(f"Invalid tick {tick} (price {price}), must be in range [{min_tick}, {max_tick}] for prices [{params['p_min']}, {params['p_max']}]")
+    else:
+        # Fallback validation: tick must be positive for valid prices
+        if tick <= 0:
+            raise ValueError(f"Invalid tick {tick}, must be > 0")
     
     is_buy_str = 'buy' if is_buy else 'sell'
     if yes_no not in binary['lob_pools']:
@@ -50,10 +61,25 @@ def add_to_lob_pool(
     if key not in binary['lob_pools'][yes_no][is_buy_str]:
         binary['lob_pools'][yes_no][is_buy_str][key] = {'volume': Decimal('0'), 'shares': {}}
     pool = binary['lob_pools'][yes_no][is_buy_str][key]
-    pool['volume'] += amount
+    
+    # Calculate volume per TDD: buy pools store USDC volume, sell pools store token volume
+    if tick_size is None:
+        # Fallback: try to get tick_size from state params, otherwise use default
+        tick_size = state.get('params', {}).get('tick_size', Decimal('0.01'))
+    
+    price = Decimal(tick) * tick_size
+    
+    if is_buy:
+        # Buy pools: volume = USDC amount (amount * price)
+        volume_to_add = amount * price
+    else:
+        # Sell pools: volume = token amount
+        volume_to_add = amount
+    
+    pool['volume'] += volume_to_add
     if user_id not in pool['shares']:
         pool['shares'][user_id] = Decimal('0')
-    pool['shares'][user_id] += amount
+    pool['shares'][user_id] += amount  # User shares always track token amount
 
 
 def cancel_from_pool(
@@ -64,6 +90,7 @@ def cancel_from_pool(
     tick: int,
     user_id: str,
     af_opt_in: bool,
+    tick_size: Decimal = None,
 ) -> Decimal:
     binary = get_binary(state, i)
     is_buy_str = 'buy' if is_buy else 'sell'
@@ -76,7 +103,22 @@ def cancel_from_pool(
     if user_id not in pool['shares']:
         raise ValueError(f"User {user_id} not found in pool")
     share = pool['shares'][user_id]
-    pool['volume'] -= share
+    
+    # Calculate volume reduction per TDD: buy pools store USDC, sell pools store tokens
+    if tick_size is None:
+        # Fallback: try to get tick_size from state params, otherwise use default
+        tick_size = state.get('params', {}).get('tick_size', Decimal('0.01'))
+    
+    price = Decimal(tick) * tick_size
+    
+    if is_buy:
+        # Buy pools: reduce USDC volume (share * price)
+        volume_to_reduce = share * price
+    else:
+        # Sell pools: reduce token volume (share)
+        volume_to_reduce = share
+    
+    pool['volume'] -= volume_to_reduce
     del pool['shares'][user_id]
     if pool['volume'] <= Decimal('0'):
         del binary['lob_pools'][yes_no][is_buy_str][key]
@@ -115,35 +157,41 @@ def cross_match_binary(
             tick_no = get_tick_from_key(k_no)
             price_no = price_value(Decimal(tick_no) * params['tick_size'])
             
-            # Check if prices sum to >= 1 for valid cross-match
-            if price_yes + price_no < Decimal('1'):
+            # Check cross-matching condition per TDD: T + S ≥ 1 + f_match * (T + S) / 2
+            # This ensures net collateral ≥ fill for solvency preservation
+            min_sum = Decimal('1') + params['f_match'] * (price_yes + price_no) / Decimal('2')
+            if price_yes + price_no < min_sum:
                 continue
                 
             pool_yes = binary['lob_pools']['YES']['buy'][k_yes]
             pool_no = binary['lob_pools']['NO']['sell'][k_no]
             
             # Calculate max fill based on pool volumes
-            # Both pools store volume as token quantities
-            max_fill_yes = pool_yes['volume']  # YES tokens wanted
+            # YES buy pool stores USDC volume, NO sell pool stores token volume
+            max_fill_yes = pool_yes['volume'] / price_yes  # Convert USDC to tokens
             max_fill_no = pool_no['volume']    # NO tokens available
             fill = min(max_fill_yes, max_fill_no)
             
             if fill <= Decimal('0'):
                 continue
                 
-            # Calculate fee (TDD: f_match * (T + S) * Δ / 2 to maker)
+            # Calculate fee (TDD: f_match * (T + S) * Δ / 2 split between maker/taker)
             fee = params['f_match'] * fill * (price_yes + price_no) / Decimal('2')
             
-            # Update V with net collateral added (price_yes + price_no - fee)
-            binary['V'] += (price_yes + price_no - fee / fill) * fill
+            # Update V with net collateral per TDD: V_i += (T + S) * Δ - fee
+            # This implements true limit price enforcement where:
+            # - YES buyers pay exactly price_yes (their limit price T)
+            # - NO sellers receive exactly price_no (their limit price S) 
+            # - Trading fees are applied separately and transparently
+            binary['V'] = float(Decimal(binary['V']) + (price_yes + price_no) * fill - fee)
             update_subsidies(state, params)
             
             # Update token supplies
-            binary['q_yes'] += fill
-            binary['q_no'] += fill
+            binary['q_yes'] = float(Decimal(binary['q_yes']) + fill)
+            binary['q_no'] = float(Decimal(binary['q_no']) + fill)
             
-            # Reduce pool volumes (both are in tokens)
-            pool_yes['volume'] -= fill  # Reduce YES tokens wanted
+            # Reduce pool volumes with correct semantics
+            pool_yes['volume'] -= fill * price_yes  # Reduce USDC volume
             pool_no['volume'] -= fill   # Reduce NO tokens available
             
             # Clean up pools if completely consumed
@@ -151,7 +199,7 @@ def cross_match_binary(
                 del binary['lob_pools']['YES']['buy'][k_yes]
             else:
                 # Reduce all shares proportionally
-                original_volume = pool_yes['volume'] + fill
+                original_volume = pool_yes['volume'] + fill * price_yes
                 ratio = pool_yes['volume'] / original_volume
                 for user in pool_yes['shares']:
                     pool_yes['shares'][user] *= ratio
@@ -196,6 +244,18 @@ def match_market_order(
     current_ts: int,
     tick_id: int,
 ) -> tuple[List[Dict[str, Any]], Decimal]:
+    """
+    Match a market order against LOB pools, respecting true limit price enforcement.
+    
+    Per TDD: Limit orders in pools execute at exactly their specified prices,
+    with trading fees applied separately and transparently. Market orders get
+    filled at the limit prices of the opposing pools they match against.
+    
+    This ensures traditional limit order book behavior where:
+    - Limit order makers get exactly their requested price
+    - Market order takers pay the limit prices plus transparent fees
+    - No surprise pricing due to pooled collateral effects
+    """
     # Validate size
     if size <= Decimal('0'):
         raise ValueError("Size must be positive")
@@ -245,9 +305,14 @@ def match_market_order(
             fill = min(remaining, max_fill)
         
         if fill > Decimal('0'):
-            fee = params['f'] * fill * price
+            # Calculate transparent trading fee per TDD
+            # Market orders pay fees on top of limit prices, not embedded in them
+            fee_rate = params.get('f', params.get('fee_rate', Decimal('0.01')))
+            fee = fee_rate * fill * price
             
             # Create aggregated fill (single fill per pool)
+            # Limit order makers get exactly their limit price (price)
+            # Market order takers pay limit price + transparent fee
             fills.append({
                 'trade_id': str(hash(current_ts + len(fills))),
                 'buy_user_id': 'market_user' if is_buy else 'limit_pool',

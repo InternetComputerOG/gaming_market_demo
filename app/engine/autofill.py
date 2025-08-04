@@ -236,18 +236,20 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             if is_increase:
                 X = buy_cost_yes(binary, delta, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j)
                 charge = usdc_amount(pool_tick * delta)
-                print(f"DEBUG: Buy - X={X}, charge={charge}")
+                surplus = charge - X  # For buys: what we charge minus what it costs
+                print(f"DEBUG: Buy - X={X}, charge={charge}, surplus={surplus}")
             else:
                 X = sell_received_yes(binary, delta, params, f_j) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j)
-                charge = usdc_amount(delta * (Decimal('1') - pool_tick))
-                print(f"DEBUG: Sell - X={X}, charge={charge}")
-            surplus = charge - X
+                charge = usdc_amount(pool_tick * delta)  # What we pay to pool holders
+                surplus = X - charge  # For sells: what we receive minus what we pay
+                print(f"DEBUG: Sell - X={X}, charge={charge}, surplus={surplus}")
             print(f"DEBUG: surplus = {surplus}")
             if surplus <= Decimal('0'):
                 continue
             
             # Apply caps
             cap_delta = (params['af_cap_frac'] * abs(diversion)) / pool_tick
+            print(f"DEBUG: cap_delta = {cap_delta}, delta = {delta}, af_cap_frac = {params['af_cap_frac']}, diversion = {diversion}")
             if delta > cap_delta:
                 delta = cap_delta
                 # Recalculate with capped delta
@@ -260,22 +262,30 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                     charge = pool_tick * delta
                     surplus = X - charge
             
+            print(f"DEBUG: After caps - delta = {delta}, surplus = {surplus}")
             if surplus <= Decimal('0'):
+                print(f"DEBUG: Surplus <= 0 after caps, skipping")
                 continue
+            print(f"DEBUG: pools_filled = {pools_filled}, af_max_pools = {params['af_max_pools']}")
+            if pools_filled >= params['af_max_pools']:
+                print(f"DEBUG: Max pools reached, breaking")
+                break
             original_volume = Decimal(str(pool['volume']))
             original_shares = dict(pool['shares'])  # Copy for rebates
-            position_deltas, balance_deltas = update_pool_and_get_deltas(pool, delta, charge if is_increase else pool_tick * delta, is_increase)
+            position_deltas, balance_deltas = update_pool_and_get_deltas(pool, delta, charge, is_increase)
+            token_field = 'q_yes' if yes_no == 'YES' else 'q_no'
             if is_increase:
-                binary['q_yes' if yes_no == 'YES' else 'q_no'] += delta
+                binary[token_field] = float(Decimal(str(binary[token_field])) + delta)
             else:
-                binary['q_yes' if yes_no == 'YES' else 'q_no'] -= delta
+                binary[token_field] = float(Decimal(str(binary[token_field])) - delta)
             system_surplus = params['sigma'] * surplus
             binary['V'] += float(system_surplus)
             update_subsidies(state, params)
             apply_rebates(surplus, params['sigma'], original_volume, original_shares, balance_deltas)
             total_surplus += surplus
+            print(f"DEBUG: Creating AUTO_FILL event for binary {j}, tick {tick_int}, delta {delta}")
             events.append({
-                'type': 'auto_fill',
+                'type': 'AUTO_FILL',
                 'binary_id': j,
                 'is_yes': yes_no == 'YES',
                 'tick': tick_int,
@@ -285,6 +295,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 'user_balance_deltas': balance_deltas
             })
             pools_filled += 1
+            print(f"DEBUG: Event created, pools_filled now = {pools_filled}")
     if total_surplus > params['af_max_surplus'] * (abs(diversion) / params['zeta_start']):
         total_surplus = params['af_max_surplus'] * (abs(diversion) / params['zeta_start'])
     return total_surplus, events

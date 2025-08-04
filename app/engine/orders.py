@@ -5,7 +5,7 @@ from typing_extensions import TypedDict
 from .state import EngineState, BinaryState, get_binary, update_subsidies, get_p_yes, get_p_no
 from .params import EngineParams
 from .amm_math import buy_cost_yes, sell_received_yes, buy_cost_no, sell_received_no, get_effective_p_yes, get_effective_p_no
-from .impact_functions import compute_dynamic_params, compute_f_i, apply_own_impact, apply_cross_impacts, apply_asymptotic_penalty
+from .impact_functions import compute_dynamic_params, compute_f_i, apply_own_impact, apply_cross_impacts, apply_asymptotic_penalty, get_new_prices_after_impact
 from .lob_matching import add_to_lob_pool, cross_match_binary, match_market_order
 from .autofill import trigger_auto_fills
 from app.utils import usdc_amount, price_value, validate_price, validate_size, safe_divide
@@ -69,14 +69,22 @@ def apply_orders(
             validate_size(order['size'])
             if order['limit_price'] is not None:
                 validate_price(order['limit_price'])
+                # Validate limit price bounds per TDD [p_min, p_max]
+                if order['limit_price'] < Decimal(str(params_dyn['p_min'])) or order['limit_price'] > Decimal(str(params_dyn['p_max'])):
+                    raise ValueError(f"Limit price {order['limit_price']} outside bounds [{params_dyn['p_min']}, {params_dyn['p_max']}]")
         except ValueError as e:
             events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': str(e)}})
             continue
         tick = int(order['limit_price'] / Decimal(params_dyn['tick_size']))  # Per TDD tick granularity
-        add_to_lob_pool(state, i, order['yes_no'], order['is_buy'], tick, order['user_id'], order['size'], order['af_opt_in'])
+        add_to_lob_pool(state, i, order['yes_no'], order['is_buy'], tick, order['user_id'], order['size'], order['af_opt_in'], Decimal(params_dyn['tick_size']))
         events.append({'type': 'ORDER_ACCEPTED', 'payload': {'order_id': order['order_id'], 'type': 'LIMIT'}})
 
     # Perform cross-matching for all binaries if enabled
+    # Cross-matching implements true limit price enforcement:
+    # - YES buyers pay exactly their limit price T
+    # - NO sellers receive exactly their limit price S  
+    # - Trading fees applied separately: f_match * (T + S) / 2 split between sides
+    # - System collateral: V_i += (T + S) * fill - fee
     if params_dyn['cm_enabled']:
         for b in state['binaries']:
             if b['active']:
@@ -100,7 +108,9 @@ def apply_orders(
         is_yes = order['yes_no'] == 'YES'
         is_buy = order['is_buy']
         size = order['size']
-        # Match against LOB first
+        # Match against LOB first - implements true limit price enforcement
+        # Market orders get filled at limit order prices (at-or-better execution)
+        # Fees are applied transparently and separately from execution prices
         lob_fills, remaining = match_market_order(state, i, is_buy, is_yes, size, params_dyn, current_time, tick_id=0)
         fills.extend(lob_fills)
         if remaining <= Decimal('0'):
@@ -119,14 +129,7 @@ def apply_orders(
                 X = buy_cost_no(binary, remaining, params_dyn, f_i)
             else:
                 X = sell_received_no(binary, remaining, params_dyn, f_i)
-        # Compute new price after impact
-        new_p_yes, new_p_no = get_new_prices_after_impact(binary, remaining, X, f_i, is_buy, is_yes)
-        effective_p = new_p_yes if is_yes else new_p_no
-        # Apply asymptotic penalty if needed
-        X = apply_asymptotic_penalty(X, effective_p, current_p, is_buy, params_dyn)
-        # Recompute effective_p post-penalty (approximate, as penalty adjusts X)
-        effective_p = (get_effective_p_yes(binary) + remaining if is_buy and is_yes else get_effective_p_yes(binary) - remaining if not is_buy and is_yes else ...) / (L + f_i * X * (1 if is_buy else -1))  # Simplified; use full get_new_prices
-        # Use get_new_prices_after_impact again with adjusted X
+        # Compute new price after impact (penalty already applied in AMM cost functions)
         new_p_yes, new_p_no = get_new_prices_after_impact(binary, remaining, X, f_i, is_buy, is_yes)
         effective_p = new_p_yes if is_yes else new_p_no
         # Compute slippage
@@ -137,7 +140,8 @@ def apply_orders(
         if order['max_slippage'] is not None and slippage > Decimal(order['max_slippage']):
             events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': 'max slippage exceeded'}})
             continue
-        # Apply fee (on trade value)
+        # Apply AMM fee (on trade value) - consistent with LOB fee transparency
+        # AMM fees are separate from execution prices, maintaining user experience consistency
         fee = Decimal(params_dyn['fee_rate']) * remaining * effective_p
         # Create AMM fill
         fill: Fill = {
@@ -153,6 +157,18 @@ def apply_orders(
             'ts_ms': current_time
         }
         fills.append(fill)
+        # Update token supplies to reflect the trade
+        binary = get_binary(state, i)
+        if is_yes:
+            if is_buy:
+                binary['q_yes'] = float(Decimal(binary['q_yes']) + remaining)
+            else:
+                binary['q_yes'] = float(Decimal(binary['q_yes']) - remaining)
+        else:
+            if is_buy:
+                binary['q_no'] = float(Decimal(binary['q_no']) + remaining)
+            else:
+                binary['q_no'] = float(Decimal(binary['q_no']) - remaining)
         # Apply own impact
         apply_own_impact(state, i, X, is_buy, is_yes, f_i, params_dyn)
         # Apply cross impacts (diversions)
@@ -161,7 +177,8 @@ def apply_orders(
         update_subsidies(state, params_dyn)
         # Trigger auto-fills if enabled
         if params_dyn['af_enabled']:
-            trigger_auto_fills(state, i, X, is_buy, params_dyn, current_time)
+            auto_fill_events = trigger_auto_fills(state, i, X, is_buy, params_dyn, current_time)
+            events.extend(auto_fill_events)
         events.append({'type': 'ORDER_FILLED', 'payload': {'order_id': order['order_id']}})
 
     return fills, state, events

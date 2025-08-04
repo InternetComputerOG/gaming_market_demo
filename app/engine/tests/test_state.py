@@ -63,8 +63,11 @@ def test_init_state_varying_n(n_outcomes: int, default_params: Dict[str, Any]):
     params = {**default_params, "n_outcomes": n_outcomes}
     state = init_state(params)
     assert len(state["binaries"]) == n_outcomes
-    subsidy_per = params["z"] / n_outcomes
-    assert state["pre_sum_yes"] == pytest.approx(n_outcomes * (params["q0"] / subsidy_per))
+    
+    # After subsidy fix: subsidy_init = 2 * q0 (not z / n_outcomes)
+    # So pre_sum_yes = n_outcomes * (q0 / (2 * q0)) = n_outcomes / 2
+    expected_pre_sum_yes = n_outcomes / 2
+    assert state["pre_sum_yes"] == pytest.approx(expected_pre_sum_yes)
 
 
 def test_serialize_deserialize_round_trip(initial_state: EngineState):

@@ -158,7 +158,7 @@ def test_auto_fill_buy_diversion(default_params: EngineParams, initial_state: En
     assert total_surplus > Decimal('0')
     assert len(events) > 0
     event: AutoFillEvent = events[0]
-    assert event['type'] == 'auto_fill'
+    assert event['type'] == 'AUTO_FILL'
     assert event['delta'] > Decimal('0')
     assert event['surplus'] > Decimal('0')
     update_subsidies(initial_state, default_params)

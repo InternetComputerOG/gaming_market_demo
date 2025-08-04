@@ -26,7 +26,10 @@ def init_state(params: Dict[str, Any]) -> EngineState:
     z = params['z']
     gamma = params['gamma']
     q0 = params['q0']
-    subsidy_init = z / n_outcomes
+    # Per TDD: p_yes = p_no = q0 / L_i = 0.5
+    # Therefore: L_i = 2 * q0
+    # Since V_i = 0 initially: subsidy_i = L_i - V_i = 2 * q0
+    subsidy_init = 2 * q0
     binaries = []
     for i in range(n_outcomes):
         binaries.append({

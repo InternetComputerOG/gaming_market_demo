@@ -95,12 +95,14 @@ def test_add_to_lob_pool(init_state: EngineState, default_params: EngineParams):
     add_to_lob_pool(state, 1, 'YES', True, 50, 'user1', Decimal('100'), True)
     binary = get_binary(state, 1)
     pool = binary['lob_pools']['YES']['buy'][50]
-    assert pool['volume'] == Decimal('100')
-    assert pool['shares']['user1'] == Decimal('100')
+    # Buy pool volume = amount * price = 100 * 0.50 = 50 USDC
+    assert pool['volume'] == Decimal('50.00')
+    assert pool['shares']['user1'] == Decimal('100')  # Shares still track token amount
 
     # Add more same pool
     add_to_lob_pool(state, 1, 'YES', True, 50, 'user2', Decimal('50'), True)
-    assert pool['volume'] == Decimal('150')
+    # Total volume = (100 + 50) * 0.50 = 75 USDC
+    assert pool['volume'] == Decimal('75.00')
     assert pool['shares']['user1'] == Decimal('100')
     assert pool['shares']['user2'] == Decimal('50')
 
@@ -117,9 +119,10 @@ def test_cancel_from_pool(init_state: EngineState, default_params: EngineParams)
 
     binary = get_binary(state, 1)
     returned = cancel_from_pool(state, 1, 'YES', True, 50, 'user1', True)
-    assert returned == Decimal('100')
+    assert returned == Decimal('100')  # Returns token amount
     pool = binary['lob_pools']['YES']['buy'][50]
-    assert pool['volume'] == Decimal('50')
+    # Remaining volume = 50 tokens * $0.50 = $25 USDC
+    assert pool['volume'] == Decimal('25.00')
     assert 'user1' not in pool['shares']
     assert pool['shares']['user2'] == Decimal('50')
 
@@ -132,7 +135,8 @@ def test_cancel_from_pool(init_state: EngineState, default_params: EngineParams)
         cancel_from_pool(state, 1, 'YES', True, 50, 'user3', True)
 
 def test_cross_match_binary(init_state: EngineState, default_params: EngineParams):
-    state = init_state
+    import copy
+    state = copy.deepcopy(init_state)
     params = default_params.copy()
     params['tick_size'] = Decimal('0.01')
     tick_yes = 50  # $0.50
@@ -152,8 +156,11 @@ def test_cross_match_binary(init_state: EngineState, default_params: EngineParam
     fee = Decimal('0.005') * Decimal('100') * (Decimal('0.50') + Decimal('0.60')) / Decimal('2')
     expected_v_increase = (Decimal('0.50') + Decimal('0.60')) * Decimal('100') - fee
     assert abs(Decimal(str(binary['V'])) - expected_v_increase) < Decimal('0.001')  # Allow small precision difference
-    assert binary['q_yes'] == default_params['q0'] + Decimal('100')
-    assert binary['q_no'] == default_params['q0'] + Decimal('100')
+    # Check token supplies increased by fill amount (allowing for float precision)
+    expected_q_yes = float(default_params['q0'] + Decimal('100'))
+    expected_q_no = float(default_params['q0'] + Decimal('100'))
+    assert abs(binary['q_yes'] - expected_q_yes) < 0.001
+    assert abs(binary['q_no'] - expected_q_no) < 0.001
     assert 50 not in binary['lob_pools']['YES']['buy']
     assert 60 not in binary['lob_pools']['NO']['sell']
 
