@@ -33,13 +33,16 @@ def update_config(config_data: Dict[str, Any]) -> None:
     # Try to update existing config, or insert if none exists
     existing = db.table('config').select('config_id').limit(1).execute()
     
-    # Handle special timestamp conversion
-    update_data = config_data.copy()
-    if 'start_ts_ms' in update_data:
+    # Handle special timestamp conversion and wrap params in JSONB
+    update_data = {}
+    if 'start_ts_ms' in config_data:
         # Convert milliseconds to timestamp for database
         from datetime import datetime
-        start_ts_ms = update_data.pop('start_ts_ms')
+        start_ts_ms = config_data['start_ts_ms']
         update_data['start_ts'] = datetime.fromtimestamp(start_ts_ms / 1000).isoformat()
+    
+    # Store the entire config_data as params JSONB
+    update_data['params'] = config_data
     
     if existing.data:
         # Update existing config
@@ -132,7 +135,7 @@ def insert_order(order: Dict[str, Any]) -> str:
 
 def fetch_open_orders(binary_id: int) -> List[Dict[str, Any]]:
     db = get_db()
-    return db.table('orders').select('*').eq('binary_id', binary_id).eq('status', 'OPEN').execute().data
+    return db.table('orders').select('*').eq('outcome_i', binary_id).eq('status', 'OPEN').execute().data
 
 def fetch_user_orders(user_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
     """Fetch orders for a specific user, optionally filtered by status"""
@@ -156,7 +159,7 @@ def insert_or_update_pool(pool: Dict[str, Any]) -> None:
 
 def fetch_pools(binary_id: int) -> List[Dict[str, Any]]:
     db = get_db()
-    return db.table('lob_pools').select('*').eq('binary_id', binary_id).execute().data
+    return db.table('lob_pools').select('*').eq('outcome_i', binary_id).execute().data
 
 # Trades queries
 def insert_trades_batch(trades: List[Dict[str, Any]]) -> None:

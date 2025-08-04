@@ -180,7 +180,7 @@ def apply_orders(
             continue
         # Apply AMM fee (on trade value) - consistent with LOB fee transparency
         # AMM fees are separate from execution prices, maintaining user experience consistency
-        fee = Decimal(params_dyn['fee_rate']) * remaining * effective_p
+        fee = Decimal(params_dyn['f']) * remaining * effective_p
         # Create AMM fill
         fill: Fill = {
             'trade_id': str(len(fills)),  # Deterministic ID for demo

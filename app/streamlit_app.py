@@ -3,6 +3,7 @@ import time
 from uuid import uuid4
 from typing import Dict, Any, List, Optional
 from decimal import Decimal
+from datetime import datetime
 
 from app.config import get_supabase_client
 from app.utils import get_current_ms, usdc_amount, price_value, validate_size, validate_price, validate_limit_price_bounds
@@ -54,7 +55,18 @@ if status == 'RESOLVED':
 
 params: Dict[str, Any] = config['params']
 current_ms = get_current_ms()
-start_ms = int(config['start_ts'])
+
+# Handle both start_ts_ms (integer) and start_ts (ISO string) formats
+if 'start_ts_ms' in config and config['start_ts_ms']:
+    start_ms = int(config['start_ts_ms'])
+elif 'start_ts' in config and config['start_ts']:
+    # Parse ISO timestamp and convert to milliseconds
+    start_dt = datetime.fromisoformat(config['start_ts'].replace('Z', '+00:00'))
+    start_ms = int(start_dt.timestamp() * 1000)
+else:
+    # Fallback to current time if no start time is set
+    start_ms = current_ms
+
 elapsed_ms = current_ms - start_ms
 total_duration_ms = params['total_duration'] * 1000
 time_to_end = max(0, (total_duration_ms - elapsed_ms) / 1000)
@@ -83,19 +95,19 @@ for outcome_i, tab in enumerate(outcome_tabs):
         col1, col2 = st.columns(2)
         with col1:
             st.header("Order Ticket")
-            yes_no = st.radio("Token", ['YES', 'NO'])
-            direction = st.radio("Direction", ['Buy', 'Sell'])
+            yes_no = st.radio("Token", ['YES', 'NO'], key=f"token_{outcome_i}")
+            direction = st.radio("Direction", ['Buy', 'Sell'], key=f"direction_{outcome_i}")
             is_buy = direction == 'Buy'
-            order_type = st.selectbox("Type", ['MARKET', 'LIMIT'])
-            size_input = st.number_input("Size", min_value=0.01, value=1.0)
+            order_type = st.selectbox("Type", ['MARKET', 'LIMIT'], key=f"order_type_{outcome_i}")
+            size_input = st.number_input("Size", min_value=0.01, value=1.0, key=f"size_{outcome_i}")
             size = usdc_amount(size_input)
             limit_price_input: Optional[float] = None
             max_slippage_input: Optional[float] = None
             if order_type == 'LIMIT':
-                limit_price_input = st.number_input("Limit Price", min_value=0.0, max_value=1.0, step=0.01, value=0.5)
+                limit_price_input = st.number_input("Limit Price", min_value=0.0, max_value=1.0, step=0.01, value=0.5, key=f"limit_price_{outcome_i}")
             else:
-                max_slippage_input = st.number_input("Max Slippage %", min_value=0.0, value=5.0) / 100
-            af_opt_in = st.checkbox("Auto-Fill Opt-In", value=True) if params['af_enabled'] else False
+                max_slippage_input = st.number_input("Max Slippage %", min_value=0.0, value=5.0, key=f"max_slippage_{outcome_i}") / 100
+            af_opt_in = st.checkbox("Auto-Fill Opt-In", value=True, key=f"af_opt_in_{outcome_i}") if params['af_enabled'] else False
 
             try:
                 validate_size(size)
@@ -203,7 +215,7 @@ for outcome_i, tab in enumerate(outcome_tabs):
                 est = {'would_reject': True}
 
             disable_submit = est['would_reject'] if 'est' in locals() else True
-            if st.button("Submit Order", disabled=disable_submit):
+            if st.button("Submit Order", disabled=disable_submit, key=f"submit_{outcome_i}"):
                 try:
                     order_data = {
                         'outcome_i': outcome_i,
@@ -454,26 +466,27 @@ with pos_tab2:
         st.write(f"**You have {len(orders)} open limit orders**")
         
         for i, order in enumerate(orders):
-            with st.expander(f"📋 Order #{order['order_id']} - {order['yes_no']} {order['direction']}", expanded=True):
+            with st.expander(f"📋 Order #{order['order_id']} - {order['yes_no']} {order['type']}", expanded=True):
                 # Order details in columns
                 detail_col1, detail_col2, detail_col3 = st.columns(3)
                 
                 with detail_col1:
                     st.write(f"**Token:** {order['yes_no']}")
-                    st.write(f"**Direction:** {order['direction']}")
+                    st.write(f"**Type:** {order['type']}")
                     st.write(f"**Size:** {float(order['size']):.2f} tokens")
                 
                 with detail_col2:
-                    st.write(f"**Limit Price:** ${float(order['limit_price']):.4f}")
+                    limit_price_display = f"${float(order['limit_price']):.4f}" if order['limit_price'] is not None else "N/A (Market Order)"
+                    st.write(f"**Limit Price:** {limit_price_display}")
                     st.write(f"**Remaining:** {float(order['remaining']):.2f} tokens")
                     st.write(f"**Status:** {order['status']}")
                 
                 with detail_col3:
-                    # Calculate potential returns for this limit order
+                    # Calculate potential returns for limit orders only
                     remaining_tokens = float(order['remaining'])
-                    limit_price = float(order['limit_price'])
                     
-                    if order['direction'] == 'BUY' and remaining_tokens > 0:
+                    if order['type'] == 'LIMIT' and order['limit_price'] is not None and remaining_tokens > 0:
+                        limit_price = float(order['limit_price'])
                         total_cost = remaining_tokens * limit_price
                         potential_payout = remaining_tokens * 1.0
                         potential_profit = potential_payout - total_cost
@@ -492,8 +505,13 @@ with pos_tab2:
                         else:
                             st.success("✅ Good value - reasonable price")
                     else:
-                        st.write(f"**Sell Order:** {remaining_tokens:.2f} tokens")
-                        st.write(f"**Expected Proceeds:** ${remaining_tokens * limit_price:.2f}")
+                        # For MARKET orders or orders without limit price
+                        if order['type'] == 'MARKET':
+                            st.write(f"**Market Order:** {remaining_tokens:.2f} tokens")
+                            st.write("**Price:** Determined at execution")
+                        else:
+                            st.write(f"**Order:** {remaining_tokens:.2f} tokens")
+                            st.write("**Status:** Pending processing")
                 
                 # Enhanced cancellation interface
                 st.write("---")
@@ -560,7 +578,11 @@ with pos_tab3:
         if orders:
             for order in orders:
                 remaining = float(order['remaining'])
-                st.write(f"• {order['direction']} {remaining:.2f} {order['yes_no']} @ ${float(order['limit_price']):.4f}")
+                if order['limit_price'] is not None:
+                    price_display = f"@ ${float(order['limit_price']):.4f}"
+                else:
+                    price_display = "(Market Price)"
+                st.write(f"• {order['type']} {remaining:.2f} {order['yes_no']} {price_display}")
         else:
             st.write("*No pending orders*")
     
@@ -577,11 +599,11 @@ with pos_tab3:
         st.metric("Open Orders", len(orders))
     
     with metric_col3:
-        # Calculate total committed capital in open orders
+        # Calculate total committed capital in open orders (LIMIT orders only)
         total_committed = sum(
             float(order['remaining']) * float(order['limit_price']) 
             for order in orders 
-            if order['direction'] == 'BUY'
+            if order['type'] == 'LIMIT' and order['limit_price'] is not None
         )
         st.metric("Capital Committed", f"${total_committed:.2f}")
     

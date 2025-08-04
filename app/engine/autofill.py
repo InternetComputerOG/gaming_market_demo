@@ -179,7 +179,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
         update_subsidies(state, params)
         print(f"DEBUG: After diversion - V={binary['V']}, L={binary['L']}, p_yes={get_p_yes(binary)}, p_no={get_p_no(binary)}")
     
-    f_j = Decimal('1') - (len([b for b in state['binaries'] if b['active']]) - 1) * params['zeta_start']
+    f_j = Decimal('1') - (len([b for b in state['binaries'] if b['active']]) - 1) * Decimal(str(params['zeta_start']))
     total_surplus = Decimal('0')
     events = []
     is_increase = diversion > Decimal('0')
@@ -320,6 +320,6 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             })
             pools_filled += 1
             print(f"DEBUG: Event created, pools_filled now = {pools_filled}")
-    if total_surplus > params['af_max_surplus'] * (abs(diversion) / params['zeta_start']):
-        total_surplus = params['af_max_surplus'] * (abs(diversion) / params['zeta_start'])
+    if total_surplus > Decimal(str(params['af_max_surplus'])) * (abs(diversion) / Decimal(str(params['zeta_start']))):
+        total_surplus = Decimal(str(params['af_max_surplus'])) * (abs(diversion) / Decimal(str(params['zeta_start'])))
     return total_surplus, events
