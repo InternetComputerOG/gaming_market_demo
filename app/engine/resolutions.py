@@ -119,6 +119,9 @@ def trigger_resolution(
             'winner': winner,
             'payout_total': float(total_q_yes)
         })
+        
+        # Mark winner binary as inactive after final resolution
+        winner_binary['active'] = False
 
     # Quantize payouts
     quantized_payouts = {k: usdc_amount(v) for k, v in payouts.items()}
