@@ -398,3 +398,88 @@ def create_tick(state: EngineState, raw_fills: List[Dict[str, Any]], tick_id: in
         'cross_match_pool_utilization': summary['cross_matching']['pool_utilization'],
     }
     update_metrics(metrics_data)
+
+
+def get_lob_pool_statistics(state: EngineState) -> Dict[str, Any]:
+    """Extract LOB pool statistics from engine state for admin dashboard.
+    
+    Provides comprehensive LOB pool metrics including per-outcome breakdowns,
+    volume statistics, and active pool counts for monitoring.
+    
+    Args:
+        state: Current engine state containing LOB pools
+        
+    Returns:
+        Dictionary with LOB pool statistics:
+        - total_pools: Total number of LOB pools
+        - active_pools: Number of pools with volume > 0
+        - total_volume: Total volume across all pools
+        - active_users: Number of unique users with shares
+        - per_outcome: Per-outcome breakdown of pool counts and volumes
+    """
+    if not state or 'lob_pools' not in state:
+        return {
+            'total_pools': 0,
+            'active_pools': 0,
+            'total_volume': 0.0,
+            'active_users': 0,
+            'per_outcome': {}
+        }
+    
+    lob_pools = state['lob_pools']
+    total_pools = len(lob_pools)
+    active_pools = 0
+    total_volume = Decimal('0')
+    active_users = set()
+    per_outcome = {}
+    
+    # Process each pool
+    for pool_key, pool_data in lob_pools.items():
+        try:
+            # Parse pool key: "outcome_i:yes_no:is_buy:tick"
+            parts = pool_key.split(':')
+            if len(parts) != 4:
+                continue
+                
+            outcome_i = int(parts[0])
+            yes_no = parts[1]
+            is_buy = parts[2] == 'True'
+            tick = int(parts[3])
+            
+            # Initialize outcome stats if needed
+            if outcome_i not in per_outcome:
+                per_outcome[outcome_i] = {
+                    'yes_buy_pools': 0, 'yes_buy_volume': 0.0,
+                    'yes_sell_pools': 0, 'yes_sell_volume': 0.0,
+                    'no_buy_pools': 0, 'no_buy_volume': 0.0,
+                    'no_sell_pools': 0, 'no_sell_volume': 0.0
+                }
+            
+            # Get pool volume and shares
+            volume = Decimal(str(pool_data.get('volume', 0)))
+            shares = pool_data.get('shares', {})
+            
+            # Count active pools (volume > 0)
+            if volume > 0:
+                active_pools += 1
+                total_volume += volume
+                
+                # Count active users
+                active_users.update(shares.keys())
+            
+            # Update per-outcome statistics
+            pool_type = f"{yes_no}_{'buy' if is_buy else 'sell'}"
+            per_outcome[outcome_i][f"{pool_type}_pools"] += 1
+            per_outcome[outcome_i][f"{pool_type}_volume"] += float(volume)
+            
+        except (ValueError, KeyError, IndexError) as e:
+            # Skip malformed pool keys
+            continue
+    
+    return {
+        'total_pools': total_pools,
+        'active_pools': active_pools,
+        'total_volume': float(total_volume),
+        'active_users': len(active_users),
+        'per_outcome': per_outcome
+    }

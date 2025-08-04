@@ -88,6 +88,7 @@ sequenceDiagram
      psql -d $DATABASE_URL -f app/db/schema.sql
      psql -d $DATABASE_URL -f app/db/migrations/001_initial.sql
      psql -d $DATABASE_URL -f app/db/migrations/002_add_gas_metrics.sql
+     psql -d $DATABASE_URL -f app/db/migrations/003_add_engine_state.sql
      ```
 
 5. **Seed Configuration** (optional, for default params):

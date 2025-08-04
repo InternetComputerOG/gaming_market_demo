@@ -5,10 +5,11 @@ from typing import Dict, Any, List, Optional
 from decimal import Decimal
 
 from app.config import get_supabase_client
-from app.utils import get_current_ms, usdc_amount, price_value, validate_size, validate_price
-from app.db.queries import load_config, insert_user, fetch_user_balance, fetch_positions, fetch_user_orders, get_current_tick, fetch_pools
+from app.utils import get_current_ms, usdc_amount, price_value, validate_size, validate_price, validate_limit_price_bounds
+from app.db.queries import load_config, insert_user, fetch_user_balance, fetch_positions, fetch_user_orders, get_current_tick, fetch_pools, fetch_engine_state
 from app.services.orders import submit_order, cancel_order, get_user_orders, estimate_slippage
 from app.services.positions import fetch_user_positions
+from app.engine.state import get_binary, get_p_yes, get_p_no
 
 client = get_supabase_client()
 
@@ -99,21 +100,104 @@ for outcome_i, tab in enumerate(outcome_tabs):
             try:
                 validate_size(size)
                 if limit_price_input is not None:
-                    validate_price(price_value(limit_price_input))
+                    limit_price = price_value(limit_price_input)
+                    validate_price(limit_price)
+                    validate_limit_price_bounds(limit_price, params)
                 if max_slippage_input is not None:
                     validate_price(price_value(max_slippage_input))
                 est = estimate_slippage(outcome_i, yes_no, size, is_buy, price_value(max_slippage_input) if max_slippage_input else None)
-                with st.expander("Confirmation"):
-                    st.write(f"Estimated Slippage: {float(est['estimated_slippage']):.4f}")
-                    st.write(f"Would Reject: {est['would_reject']}")
+                
+                # Enhanced transaction confirmation with comprehensive details
+                with st.expander("📋 Transaction Confirmation", expanded=True):
+                    # Order Summary
+                    st.subheader("📊 Order Summary")
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.write(f"**Token:** {yes_no}")
+                        st.write(f"**Direction:** {direction}")
+                        st.write(f"**Size:** {float(size):.2f} tokens")
+                        if limit_price_input is not None:
+                            st.write(f"**Limit Price:** ${limit_price_input:.4f}")
+                    with col_b:
+                        st.write(f"**Order Type:** {order_type}")
+                        if order_type == 'MARKET':
+                            st.write(f"**Max Slippage:** {max_slippage_input*100:.1f}%" if max_slippage_input else "No limit")
+                        st.write(f"**Auto-Fill:** {'✅ Yes' if af_opt_in else '❌ No'}")
+                    
+                    # Fee Breakdown
+                    st.subheader("💰 Fee Breakdown")
                     est_cost = est['est_cost']
                     gas_fee = Decimal(params['gas_fee'])
-                    total_est = est_cost + gas_fee if is_buy else est_cost - gas_fee
-                    st.write(f"Est Cost/Proceeds: ${float(est_cost):.2f}")
-                    st.write(f"Gas Fee: ${float(gas_fee):.2f}")
-                    st.write(f"Total: ${float(total_est):.2f}")
-                    if est['would_reject']:
-                        st.error("Estimated slippage exceeds max")
+                    
+                    # Calculate trading fee estimate and effective price
+                    if order_type == 'LIMIT' and limit_price_input is not None:
+                        # For limit orders: transparent fee structure with true limit price enforcement
+                        trading_fee_est = params['f_match'] * float(size) * limit_price_input / 2
+                        effective_price = limit_price_input  # True limit price enforcement
+                        execution_cost = float(size) * limit_price_input
+                    else:
+                        # For market orders: use slippage estimation
+                        trading_fee_est = float(est_cost) * params.get('f', 0.01)  # Fallback fee estimate
+                        effective_price = float(est_cost) / float(size) if float(size) > 0 else 0
+                        execution_cost = float(est_cost)
+                    
+                    fee_col1, fee_col2 = st.columns(2)
+                    with fee_col1:
+                        st.write(f"**Execution Cost:** ${execution_cost:.2f}")
+                        st.write(f"**Trading Fee (est.):** ${trading_fee_est:.4f}")
+                        st.write(f"**Gas Fee:** ${float(gas_fee):.4f}")
+                    with fee_col2:
+                        total_fees = trading_fee_est + float(gas_fee)
+                        if is_buy:
+                            total_cost = execution_cost + trading_fee_est + float(gas_fee)
+                            st.write(f"**Total Cost:** ${total_cost:.2f}")
+                            effective_cost_per_token = total_cost / float(size)
+                        else:
+                            total_proceeds = execution_cost - trading_fee_est - float(gas_fee)
+                            st.write(f"**Total Proceeds:** ${total_proceeds:.2f}")
+                            effective_cost_per_token = total_proceeds / float(size)
+                        st.write(f"**Total Fees:** ${total_fees:.4f}")
+                        st.write(f"**Effective Price/Token:** ${effective_cost_per_token:.4f}")
+                    
+                    # Market order specific info
+                    if order_type == 'MARKET':
+                        st.write(f"**Estimated Slippage:** {float(est['estimated_slippage'])*100:.2f}%")
+                        if est['would_reject']:
+                            st.error("⚠️ Estimated slippage exceeds maximum allowed")
+                    
+                    # Potential Returns Analysis
+                    st.subheader("🎯 Potential Returns")
+                    if is_buy:
+                        # Calculate potential return if user wins
+                        total_investment = total_cost if order_type == 'LIMIT' else execution_cost + float(gas_fee)
+                        tokens_acquired = float(size)
+                        payout_if_win = tokens_acquired * 1.0  # Each token pays $1 if outcome occurs
+                        net_profit = payout_if_win - total_investment
+                        return_multiple = payout_if_win / total_investment if total_investment > 0 else 0
+                        
+                        # Create prominent return display
+                        st.success(f"""**🎲 POTENTIAL OUTCOME:**
+**Investment:** ${total_investment:.2f}
+**If {yes_no} wins:** ${payout_if_win:.2f} payout
+**Net Profit:** ${net_profit:.2f}
+**Return Multiple:** {return_multiple:.2f}x""")
+                        
+                        # Risk warning
+                        if effective_cost_per_token > 0.8:
+                            st.warning("⚠️ **High Risk Trade:** You're paying more than $0.80 per token. Consider the probability carefully.")
+                        elif effective_cost_per_token > 0.6:
+                            st.info("ℹ️ **Moderate Risk:** You're paying a premium price. Make sure you're confident in this outcome.")
+                        else:
+                            st.info("✅ **Value Opportunity:** You're getting tokens at a reasonable price relative to potential payout.")
+                    else:
+                        # For sell orders
+                        st.info(f"**Selling {float(size):.2f} {yes_no} tokens for ~${total_proceeds:.2f}**")
+                        st.write("You're reducing your exposure to this outcome.")
+                    
+                    # True limit price enforcement explanation for limit orders
+                    if order_type == 'LIMIT':
+                        st.info("✅ **True Limit Price Enforcement**: You will pay/receive exactly your limit price. All fees are separate and transparent.")
+                        
             except ValueError as e:
                 st.error(str(e))
                 est = {'would_reject': True}
@@ -138,53 +222,377 @@ for outcome_i, tab in enumerate(outcome_tabs):
                     st.error(str(e))
 
         with col2:
-            st.header("Order Book")
+            st.header("📊 Order Book")
+            
+            # Get current market prices for reference
+            try:
+                engine_state = fetch_engine_state()
+                binary = get_binary(engine_state, outcome_i)
+                current_p_yes = get_p_yes(binary)
+                current_p_no = get_p_no(binary)
+                
+                # Display current market prices prominently
+                price_col1, price_col2 = st.columns(2)
+                with price_col1:
+                    st.metric("YES Market Price", f"${current_p_yes:.4f}", delta=None)
+                with price_col2:
+                    st.metric("NO Market Price", f"${current_p_no:.4f}", delta=None)
+                
+                st.write(f"**Spread:** ${abs(current_p_yes - current_p_no):.4f}")
+            except Exception as e:
+                st.warning("Could not load current market prices")
+                current_p_yes = current_p_no = None
+            
+            # Enhanced order book aggregation with user position tracking
             pools: List[Dict[str, Any]] = fetch_pools(outcome_i)
-            bids_yes: Dict[int, Decimal] = {}
-            asks_yes: Dict[int, Decimal] = {}
-            bids_no: Dict[int, Decimal] = {}
-            asks_no: Dict[int, Decimal] = {}
+            tick_size = Decimal(str(params.get('tick_size', 0.01)))
+            
+            # Data structures for enhanced order book
+            order_book_data = {
+                'YES': {'bids': {}, 'asks': {}},
+                'NO': {'bids': {}, 'asks': {}}
+            }
+            user_positions_in_pools = {
+                'YES': {'bids': {}, 'asks': {}},
+                'NO': {'bids': {}, 'asks': {}}
+            }
+            
+            # Process pools and aggregate by price level
             for pool in pools:
                 tick = int(pool['tick'])
+                price = Decimal(tick) * tick_size
                 volume = Decimal(pool['volume'])
-                if pool['yes_no'] == 'YES':
-                    if pool['is_buy']:
-                        bids_yes[tick] = bids_yes.get(tick, Decimal(0)) + volume
-                    else:
-                        asks_yes[tick] = asks_yes.get(tick, Decimal(0)) + volume
+                token = pool['yes_no']
+                side = 'bids' if pool['is_buy'] else 'asks'
+                
+                # Initialize price level if not exists
+                if price not in order_book_data[token][side]:
+                    order_book_data[token][side][price] = {
+                        'volume': Decimal('0'),
+                        'user_share': Decimal('0'),
+                        'tick': tick
+                    }
+                
+                # Aggregate volume
+                order_book_data[token][side][price]['volume'] += volume
+                
+                # Check if user has position in this pool
+                if 'shares' in pool and isinstance(pool['shares'], dict):
+                    user_share = Decimal(str(pool['shares'].get(user_id, 0)))
+                    order_book_data[token][side][price]['user_share'] += user_share
+                    if user_share > 0:
+                        user_positions_in_pools[token][side][price] = user_share
+            
+            # Display enhanced order book
+            tab1, tab2 = st.tabs(["📈 YES Token", "📉 NO Token"])
+            
+            with tab1:
+                st.subheader("YES Token Order Book")
+                
+                # YES Asks (sorted low to high)
+                if order_book_data['YES']['asks']:
+                    st.write("**🔴 Asks (Sellers)**")
+                    asks_data = []
+                    for price in sorted(order_book_data['YES']['asks'].keys()):
+                        data = order_book_data['YES']['asks'][price]
+                        user_indicator = "👤" if data['user_share'] > 0 else ""
+                        asks_data.append({
+                            'Price': f"${float(price):.4f}",
+                            'Volume': f"{float(data['volume']):.2f}",
+                            'Your Share': f"{float(data['user_share']):.2f}" if data['user_share'] > 0 else "-",
+                            'User': user_indicator
+                        })
+                    st.dataframe(asks_data, use_container_width=True)
                 else:
-                    if pool['is_buy']:
-                        bids_no[tick] = bids_no.get(tick, Decimal(0)) + volume
-                    else:
-                        asks_no[tick] = asks_no.get(tick, Decimal(0)) + volume
-            st.subheader("YES Bids")
-            st.table(sorted(bids_yes.items(), reverse=True))
-            st.subheader("YES Asks")
-            st.table(sorted(asks_yes.items()))
-            st.subheader("NO Bids")
-            st.table(sorted(bids_no.items(), reverse=True))
-            st.subheader("NO Asks")
-            st.table(sorted(asks_no.items()))
+                    st.write("*No asks available*")
+                
+                # Current market price indicator
+                if current_p_yes:
+                    st.write(f"**📊 Current Market Price: ${current_p_yes:.4f}**")
+                
+                # YES Bids (sorted high to low)
+                if order_book_data['YES']['bids']:
+                    st.write("**🟢 Bids (Buyers)**")
+                    bids_data = []
+                    for price in sorted(order_book_data['YES']['bids'].keys(), reverse=True):
+                        data = order_book_data['YES']['bids'][price]
+                        user_indicator = "👤" if data['user_share'] > 0 else ""
+                        bids_data.append({
+                            'Price': f"${float(price):.4f}",
+                            'Volume': f"{float(data['volume']):.2f}",
+                            'Your Share': f"{float(data['user_share']):.2f}" if data['user_share'] > 0 else "-",
+                            'User': user_indicator
+                        })
+                    st.dataframe(bids_data, use_container_width=True)
+                else:
+                    st.write("*No bids available*")
+            
+            with tab2:
+                st.subheader("NO Token Order Book")
+                
+                # NO Asks (sorted low to high)
+                if order_book_data['NO']['asks']:
+                    st.write("**🔴 Asks (Sellers)**")
+                    asks_data = []
+                    for price in sorted(order_book_data['NO']['asks'].keys()):
+                        data = order_book_data['NO']['asks'][price]
+                        user_indicator = "👤" if data['user_share'] > 0 else ""
+                        asks_data.append({
+                            'Price': f"${float(price):.4f}",
+                            'Volume': f"{float(data['volume']):.2f}",
+                            'Your Share': f"{float(data['user_share']):.2f}" if data['user_share'] > 0 else "-",
+                            'User': user_indicator
+                        })
+                    st.dataframe(asks_data, use_container_width=True)
+                else:
+                    st.write("*No asks available*")
+                
+                # Current market price indicator
+                if current_p_no:
+                    st.write(f"**📊 Current Market Price: ${current_p_no:.4f}**")
+                
+                # NO Bids (sorted high to low)
+                if order_book_data['NO']['bids']:
+                    st.write("**🟢 Bids (Buyers)**")
+                    bids_data = []
+                    for price in sorted(order_book_data['NO']['bids'].keys(), reverse=True):
+                        data = order_book_data['NO']['bids'][price]
+                        user_indicator = "👤" if data['user_share'] > 0 else ""
+                        bids_data.append({
+                            'Price': f"${float(price):.4f}",
+                            'Volume': f"{float(data['volume']):.2f}",
+                            'Your Share': f"{float(data['user_share']):.2f}" if data['user_share'] > 0 else "-",
+                            'User': user_indicator
+                        })
+                    st.dataframe(bids_data, use_container_width=True)
+                else:
+                    st.write("*No bids available*")
+            
+            # Summary of user's LOB positions
+            total_user_positions = sum(
+                len(user_positions_in_pools[token][side]) 
+                for token in ['YES', 'NO'] 
+                for side in ['bids', 'asks']
+            )
+            
+            if total_user_positions > 0:
+                st.info(f"👤 **You have positions in {total_user_positions} LOB pools** - Look for the 👤 indicator above")
 
         st.header("Recent Trades")
         trades = client.table('trades').select('*').eq('outcome_i', outcome_i).order('ts_ms', desc=True).limit(10).execute().data
         st.table([{ 'Price': float(t['price']), 'Size': float(t['size']), 'Side': t['yes_no'] } for t in trades])
 
-st.header("Your Positions")
-positions = fetch_user_positions(user_id)
-st.table([{ 'Outcome': p['outcome_i'], 'Token': p['yes_no'], 'Tokens': float(p['tokens']) } for p in positions])
+# Enhanced Position and Order Management
+st.header("💼 Your Portfolio")
 
-st.header("Your Open Orders")
-orders = get_user_orders(user_id, 'OPEN')
-for order in orders:
-    st.write(order)
-    if st.button("Cancel", key=f"cancel_{order['order_id']}"):
-        try:
-            cancel_order(order['order_id'], user_id)
-            st.success("Order canceled")
-            st.rerun()
-        except ValueError as e:
-            st.error(str(e))
+# Create tabs for different views
+pos_tab1, pos_tab2, pos_tab3 = st.tabs(["🏆 Filled Positions", "⏳ Open Limit Orders", "📊 Portfolio Summary"])
+
+with pos_tab1:
+    st.subheader("🏆 Your Filled Positions")
+    positions = fetch_user_positions(user_id)
+    
+    if positions:
+        # Enhanced position display with potential returns
+        position_data = []
+        total_portfolio_value = 0
+        total_invested = 0
+        
+        for p in positions:
+            tokens = float(p['tokens'])
+            if tokens > 0:  # Only show positions with actual tokens
+                # Calculate potential payout (each token pays $1 if outcome occurs)
+                potential_payout = tokens * 1.0
+                
+                # Estimate cost basis (this would ideally come from trade history)
+                # For now, use current market price as rough estimate
+                try:
+                    engine_state = fetch_engine_state()
+                    binary = get_binary(engine_state, p['outcome_i'])
+                    if p['yes_no'] == 'YES':
+                        current_price = get_p_yes(binary)
+                    else:
+                        current_price = get_p_no(binary)
+                    estimated_cost_basis = tokens * current_price
+                except:
+                    estimated_cost_basis = tokens * 0.5  # Fallback estimate
+                
+                total_portfolio_value += potential_payout
+                total_invested += estimated_cost_basis
+                
+                position_data.append({
+                    'Outcome': p['outcome_i'],
+                    'Token': f"{p['yes_no']} 🎯",
+                    'Tokens': f"{tokens:.2f}",
+                    'Current Value': f"${estimated_cost_basis:.2f}",
+                    'Max Payout': f"${potential_payout:.2f}",
+                    'Potential Profit': f"${potential_payout - estimated_cost_basis:.2f}",
+                    'Return Multiple': f"{potential_payout / estimated_cost_basis:.2f}x" if estimated_cost_basis > 0 else "∞"
+                })
+        
+        if position_data:
+            st.dataframe(position_data, use_container_width=True)
+            
+            # Portfolio summary metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Positions", len(position_data))
+            with col2:
+                st.metric("Current Value", f"${total_invested:.2f}")
+            with col3:
+                st.metric("Max Potential", f"${total_portfolio_value:.2f}")
+        else:
+            st.info("📭 No filled positions yet. Place some orders to start building your portfolio!")
+    else:
+        st.info("📭 No filled positions yet. Place some orders to start building your portfolio!")
+
+with pos_tab2:
+    st.subheader("⏳ Your Open Limit Orders")
+    orders = get_user_orders(user_id, 'OPEN')
+    
+    if orders:
+        st.write(f"**You have {len(orders)} open limit orders**")
+        
+        for i, order in enumerate(orders):
+            with st.expander(f"📋 Order #{order['order_id']} - {order['yes_no']} {order['direction']}", expanded=True):
+                # Order details in columns
+                detail_col1, detail_col2, detail_col3 = st.columns(3)
+                
+                with detail_col1:
+                    st.write(f"**Token:** {order['yes_no']}")
+                    st.write(f"**Direction:** {order['direction']}")
+                    st.write(f"**Size:** {float(order['size']):.2f} tokens")
+                
+                with detail_col2:
+                    st.write(f"**Limit Price:** ${float(order['limit_price']):.4f}")
+                    st.write(f"**Remaining:** {float(order['remaining']):.2f} tokens")
+                    st.write(f"**Status:** {order['status']}")
+                
+                with detail_col3:
+                    # Calculate potential returns for this limit order
+                    remaining_tokens = float(order['remaining'])
+                    limit_price = float(order['limit_price'])
+                    
+                    if order['direction'] == 'BUY' and remaining_tokens > 0:
+                        total_cost = remaining_tokens * limit_price
+                        potential_payout = remaining_tokens * 1.0
+                        potential_profit = potential_payout - total_cost
+                        return_multiple = potential_payout / total_cost if total_cost > 0 else 0
+                        
+                        st.write(f"**Total Cost:** ${total_cost:.2f}")
+                        st.write(f"**Max Payout:** ${potential_payout:.2f}")
+                        st.write(f"**Potential Profit:** ${potential_profit:.2f}")
+                        st.write(f"**Return Multiple:** {return_multiple:.2f}x")
+                        
+                        # Risk assessment
+                        if limit_price > 0.8:
+                            st.warning("⚠️ High risk - paying premium price")
+                        elif limit_price > 0.6:
+                            st.info("ℹ️ Moderate risk - above average price")
+                        else:
+                            st.success("✅ Good value - reasonable price")
+                    else:
+                        st.write(f"**Sell Order:** {remaining_tokens:.2f} tokens")
+                        st.write(f"**Expected Proceeds:** ${remaining_tokens * limit_price:.2f}")
+                
+                # Enhanced cancellation interface
+                st.write("---")
+                cancel_col1, cancel_col2 = st.columns([3, 1])
+                
+                with cancel_col1:
+                    st.write("💡 **Tip:** You can cancel this order anytime to free up your funds")
+                
+                with cancel_col2:
+                    # Use a unique key for each cancel button
+                    cancel_key = f"cancel_confirm_{order['order_id']}_{i}"
+                    
+                    if st.button("🗑️ Cancel Order", key=f"cancel_btn_{order['order_id']}_{i}", type="secondary"):
+                        # Store the order to cancel in session state
+                        st.session_state[f'cancel_pending_{order["order_id"]}'] = True
+                    
+                    # Show confirmation dialog if cancellation is pending
+                    if st.session_state.get(f'cancel_pending_{order["order_id"]}', False):
+                        st.warning("⚠️ **Confirm Cancellation**")
+                        
+                        confirm_col1, confirm_col2 = st.columns(2)
+                        with confirm_col1:
+                            if st.button("✅ Yes, Cancel", key=f"confirm_yes_{order['order_id']}_{i}", type="primary"):
+                                try:
+                                    cancel_order(order['order_id'], user_id)
+                                    st.success(f"✅ Order #{order['order_id']} canceled successfully!")
+                                    # Clear the pending state
+                                    if f'cancel_pending_{order["order_id"]}' in st.session_state:
+                                        del st.session_state[f'cancel_pending_{order["order_id"]}']
+                                    st.rerun()
+                                except ValueError as e:
+                                    st.error(f"❌ Error canceling order: {str(e)}")
+                        
+                        with confirm_col2:
+                            if st.button("❌ No, Keep", key=f"confirm_no_{order['order_id']}_{i}"):
+                                # Clear the pending state
+                                if f'cancel_pending_{order["order_id"]}' in st.session_state:
+                                    del st.session_state[f'cancel_pending_{order["order_id"]}']
+                                st.rerun()
+    else:
+        st.info("📭 No open limit orders. Your limit orders will appear here once placed.")
+        st.write("💡 **Tip:** Limit orders let you set exact prices and potentially get better deals than market orders.")
+
+with pos_tab3:
+    st.subheader("📊 Portfolio Summary")
+    
+    # Get both positions and orders for comprehensive summary
+    positions = fetch_user_positions(user_id)
+    orders = get_user_orders(user_id, 'OPEN')
+    
+    summary_col1, summary_col2 = st.columns(2)
+    
+    with summary_col1:
+        st.write("**📈 Current Holdings**")
+        filled_positions = [p for p in positions if float(p['tokens']) > 0]
+        if filled_positions:
+            for p in filled_positions:
+                st.write(f"• Outcome {p['outcome_i']}: {float(p['tokens']):.2f} {p['yes_no']} tokens")
+        else:
+            st.write("*No current holdings*")
+    
+    with summary_col2:
+        st.write("**⏳ Pending Orders**")
+        if orders:
+            for order in orders:
+                remaining = float(order['remaining'])
+                st.write(f"• {order['direction']} {remaining:.2f} {order['yes_no']} @ ${float(order['limit_price']):.4f}")
+        else:
+            st.write("*No pending orders*")
+    
+    # Overall portfolio metrics
+    st.write("---")
+    st.write("**🎯 Portfolio Metrics**")
+    
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    
+    with metric_col1:
+        st.metric("Active Positions", len([p for p in positions if float(p['tokens']) > 0]))
+    
+    with metric_col2:
+        st.metric("Open Orders", len(orders))
+    
+    with metric_col3:
+        # Calculate total committed capital in open orders
+        total_committed = sum(
+            float(order['remaining']) * float(order['limit_price']) 
+            for order in orders 
+            if order['direction'] == 'BUY'
+        )
+        st.metric("Capital Committed", f"${total_committed:.2f}")
+    
+    with metric_col4:
+        # Calculate total potential payout from positions
+        total_max_payout = sum(
+            float(p['tokens']) 
+            for p in positions 
+            if float(p['tokens']) > 0
+        )
+        st.metric("Max Potential Payout", f"${total_max_payout:.2f}")
 
 if st.button("Refresh"):
     st.rerun()

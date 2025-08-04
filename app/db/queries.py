@@ -28,17 +28,26 @@ def load_config() -> Dict[str, Any]:
         return config
     return {}
 
-def update_config(params: Dict[str, Any]) -> None:
+def update_config(config_data: Dict[str, Any]) -> None:
     db = get_db()
     # Try to update existing config, or insert if none exists
     existing = db.table('config').select('config_id').limit(1).execute()
+    
+    # Handle special timestamp conversion
+    update_data = config_data.copy()
+    if 'start_ts_ms' in update_data:
+        # Convert milliseconds to timestamp for database
+        from datetime import datetime
+        start_ts_ms = update_data.pop('start_ts_ms')
+        update_data['start_ts'] = datetime.fromtimestamp(start_ts_ms / 1000).isoformat()
+    
     if existing.data:
         # Update existing config
         config_id = existing.data[0]['config_id']
-        db.table('config').update({'params': params}).eq('config_id', config_id).execute()
+        db.table('config').update(update_data).eq('config_id', config_id).execute()
     else:
         # Insert new config
-        db.table('config').insert({'params': params}).execute()
+        db.table('config').insert(update_data).execute()
 
 def get_current_config() -> Dict[str, Any]:
     """Alias for load_config for compatibility"""
@@ -178,14 +187,18 @@ def update_metrics(metrics: Dict[str, Any]) -> None:
 # State queries
 def fetch_engine_state() -> EngineState:
     db = get_db()
-    result = db.table('config').select('state').eq('id', 1).execute()  # Assuming state in config
-    if result.data:
-        return result.data[0]['state']  # JSONB to dict
+    result = db.table('config').select('engine_state').limit(1).execute()  # Get first config record
+    if result.data and result.data[0].get('engine_state'):
+        return result.data[0]['engine_state']  # JSONB to dict
     return {'params': {}, 'binaries': [], 'total_collateral': 0.0}  # Default
 
 def save_engine_state(state: EngineState) -> None:
     db = get_db()
-    db.table('config').update({'state': state}).eq('id', 1).execute()
+    # Get the first config record and update it
+    config_result = db.table('config').select('config_id').limit(1).execute()
+    if config_result.data:
+        config_id = config_result.data[0]['config_id']
+        db.table('config').update({'engine_state': state}).eq('config_id', config_id).execute()
 
 # Transaction wrapper example for atomic ops
 def atomic_transaction(queries: List[str]) -> None:
