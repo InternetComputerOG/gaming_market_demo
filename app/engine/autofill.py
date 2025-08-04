@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Dict, List, Tuple
 
-from app.utils import safe_divide, validate_size, price_value, usdc_amount
+from app.utils import safe_divide, validate_size, price_value, usdc_amount, validate_binary_state, validate_solvency_invariant
 from .amm_math import buy_cost_yes, buy_cost_no, get_effective_p_yes, get_effective_p_no, get_new_p_yes_after_buy, get_new_p_no_after_buy, sell_received_yes, sell_received_no, get_new_p_yes_after_sell, get_new_p_no_after_sell
 from .state import BinaryState, EngineState, get_p_yes, get_p_no, update_subsidies
 from .params import EngineParams
@@ -133,20 +133,27 @@ def update_pool_and_get_deltas(pool: Dict[str, any], delta: Decimal, charge: Dec
             # For buys: users get tokens (delta) pro-rata, pay USDC (charge) pro-rata
             position_deltas[user_id] = pro_rata_fraction * delta  # Tokens received
             balance_deltas[user_id] = -(pro_rata_fraction * charge)  # USDC paid (negative)
-            # Reduce user's share by their pro-rata portion of the delta
-            pool['shares'][user_id] = user_share - (pro_rata_fraction * delta)
+            # For buy pools, reduce user's share by their pro-rata portion of the USDC charge
+            # since buy pool shares represent USDC amounts
+            pool['shares'][user_id] = user_share - (pro_rata_fraction * charge)
         else:
             # For sells: users provide tokens (delta), get USDC (charge)
             position_deltas[user_id] = -(pro_rata_fraction * delta)  # Tokens sold (negative)
             balance_deltas[user_id] = pro_rata_fraction * charge  # USDC received (positive)
-            # Reduce user's share by their pro-rata portion of the delta
+            # For sell pools, reduce user's share by their pro-rata portion of the token delta
+            # since sell pool shares represent token amounts
             pool['shares'][user_id] = user_share - (pro_rata_fraction * delta)
         
         if pool['shares'][user_id] <= Decimal('0'):
             del pool['shares'][user_id]
     
-    # Update pool volume: reduce by delta for both buys and sells
-    pool['volume'] = original_volume - delta
+    # Update pool volume according to LOB semantics:
+    # - Buy pools store USDC volume: reduce by charge (USDC amount)
+    # - Sell pools store token volume: reduce by delta (token amount)
+    if is_buy:
+        pool['volume'] = original_volume - charge  # USDC amount for buy pools
+    else:
+        pool['volume'] = original_volume - delta   # Token amount for sell pools
     
     return position_deltas, balance_deltas
 
@@ -281,6 +288,23 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             system_surplus = params['sigma'] * surplus
             binary['V'] += float(system_surplus)
             update_subsidies(state, params)
+            
+            # Validate binary state after autofill mutations
+            try:
+                validate_binary_state(binary, params)
+                validate_solvency_invariant(binary)
+            except ValueError as e:
+                # Rollback the autofill operation
+                if is_increase:
+                    binary[token_field] = float(Decimal(str(binary[token_field])) - delta)
+                else:
+                    binary[token_field] = float(Decimal(str(binary[token_field])) + delta)
+                binary['V'] -= float(system_surplus)
+                update_subsidies(state, params)  # Restore subsidies
+                # Rollback pool changes
+                pool['volume'] = original_volume
+                pool['shares'] = original_shares
+                raise ValueError(f"Autofill validation failed: {e}")
             apply_rebates(surplus, params['sigma'], original_volume, original_shares, balance_deltas)
             total_surplus += surplus
             print(f"DEBUG: Creating AUTO_FILL event for binary {j}, tick {tick_int}, delta {delta}")

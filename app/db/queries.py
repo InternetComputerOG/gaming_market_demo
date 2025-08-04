@@ -73,13 +73,40 @@ def fetch_users() -> List[Dict[str, Any]]:
 
 # Positions queries
 def update_position(user_id: str, binary_id: int, q_yes: float, q_no: float) -> None:
+    """Legacy function - updates both YES and NO positions for a user"""
+    db = get_db()
+    # Update YES position
+    db.table('positions').upsert({
+        'user_id': user_id,
+        'outcome_i': binary_id,
+        'yes_no': 'YES',
+        'tokens': q_yes
+    }).execute()
+    # Update NO position
+    db.table('positions').upsert({
+        'user_id': user_id,
+        'outcome_i': binary_id,
+        'yes_no': 'NO', 
+        'tokens': q_no
+    }).execute()
+
+def update_user_position(user_id: str, outcome_i: int, yes_no: str, tokens: float) -> None:
+    """Update a single position entry for a user"""
     db = get_db()
     db.table('positions').upsert({
         'user_id': user_id,
-        'binary_id': binary_id,
-        'q_yes': q_yes,
-        'q_no': q_no
+        'outcome_i': outcome_i,
+        'yes_no': yes_no,
+        'tokens': tokens
     }).execute()
+
+def fetch_user_position(user_id: str, outcome_i: int, yes_no: str) -> float:
+    """Fetch current token amount for a specific user position"""
+    db = get_db()
+    result = db.table('positions').select('tokens').eq('user_id', user_id).eq('outcome_i', outcome_i).eq('yes_no', yes_no).execute()
+    if result.data:
+        return float(result.data[0]['tokens'])
+    return 0.0
 
 def fetch_positions(user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     db = get_db()

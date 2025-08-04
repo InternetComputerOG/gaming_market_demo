@@ -8,7 +8,7 @@ from .amm_math import buy_cost_yes, sell_received_yes, buy_cost_no, sell_receive
 from .impact_functions import compute_dynamic_params, compute_f_i, apply_own_impact, apply_cross_impacts, apply_asymptotic_penalty, get_new_prices_after_impact
 from .lob_matching import add_to_lob_pool, cross_match_binary, match_market_order
 from .autofill import trigger_auto_fills
-from app.utils import usdc_amount, price_value, validate_price, validate_size, safe_divide
+from app.utils import usdc_amount, price_value, validate_price, validate_size, safe_divide, validate_engine_state, validate_binary_state, validate_solvency_invariant
 
 class Order(TypedDict):
     order_id: str
@@ -41,6 +41,13 @@ def apply_orders(
     params: EngineParams,
     current_time: int
 ) -> Tuple[List[Fill], EngineState, List[Dict[str, Any]]]:
+    # Validate engine state at start of order processing
+    try:
+        validate_engine_state(state, params)
+    except ValueError as e:
+        # Log validation error and raise to prevent processing with invalid state
+        raise ValueError(f"Engine state validation failed at start of apply_orders: {e}")
+    
     # Sort orders by ts_ms for deterministic processing
     orders = sorted(orders, key=lambda o: o['ts_ms'])
 
@@ -62,6 +69,14 @@ def apply_orders(
             continue
         i = order['outcome_i']
         binary = get_binary(state, i)
+        
+        # Validate binary state before processing
+        try:
+            validate_binary_state(binary, params_dyn)
+        except ValueError as e:
+            events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': f'Binary state validation failed: {e}'}})
+            continue
+            
         if not binary['active']:
             events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': 'binary inactive'}})
             continue
@@ -88,8 +103,23 @@ def apply_orders(
     if params_dyn['cm_enabled']:
         for b in state['binaries']:
             if b['active']:
+                # Validate binary state before cross-matching
+                try:
+                    validate_binary_state(b, params_dyn)
+                except ValueError as e:
+                    # Log validation error but continue with other binaries
+                    events.append({'type': 'VALIDATION_ERROR', 'payload': {'outcome_i': b['outcome_i'], 'reason': f'Binary state validation failed before cross-matching: {e}'}})
+                    continue
+                    
                 cm_fills = cross_match_binary(state, b['outcome_i'], params_dyn, current_time, tick_id=0)  # tick_id placeholder
                 fills.extend(cm_fills)
+                
+                # Validate solvency after cross-matching
+                try:
+                    validate_solvency_invariant(b)
+                except ValueError as e:
+                    # This is critical - solvency violation should halt processing
+                    raise ValueError(f"Solvency invariant violated after cross-matching for binary {b['outcome_i']}: {e}")
 
     # Process MARKET orders
     for order in orders:
@@ -97,6 +127,14 @@ def apply_orders(
             continue
         i = order['outcome_i']
         binary = get_binary(state, i)
+        
+        # Validate binary state before processing market order
+        try:
+            validate_binary_state(binary, params_dyn)
+        except ValueError as e:
+            events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': f'Binary state validation failed: {e}'}})
+            continue
+            
         if not binary['active']:
             events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': 'binary inactive'}})
             continue
@@ -169,16 +207,52 @@ def apply_orders(
                 binary['q_no'] = float(Decimal(binary['q_no']) + remaining)
             else:
                 binary['q_no'] = float(Decimal(binary['q_no']) - remaining)
+        
+        # Validate solvency after token supply update
+        try:
+            validate_solvency_invariant(binary)
+        except ValueError as e:
+            # Critical error - rollback the token supply change and reject order
+            if is_yes:
+                if is_buy:
+                    binary['q_yes'] = float(Decimal(binary['q_yes']) - remaining)
+                else:
+                    binary['q_yes'] = float(Decimal(binary['q_yes']) + remaining)
+            else:
+                if is_buy:
+                    binary['q_no'] = float(Decimal(binary['q_no']) - remaining)
+                else:
+                    binary['q_no'] = float(Decimal(binary['q_no']) + remaining)
+            # Remove the fill that was just added
+            fills.pop()
+            events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': f'Solvency invariant violated: {e}'}})
+            continue
+            
         # Apply own impact
         apply_own_impact(state, i, X, is_buy, is_yes, f_i, params_dyn)
         # Apply cross impacts (diversions)
         apply_cross_impacts(state, i, X, is_buy, zeta, params_dyn)
         # Update subsidies across all binaries
         update_subsidies(state, params_dyn)
+        
+        # Validate solvency after impact and subsidy updates
+        try:
+            validate_solvency_invariant(binary)
+        except ValueError as e:
+            # This should not happen if the AMM math is correct, but catch it as a safety net
+            raise ValueError(f"Solvency invariant violated after impact/subsidy updates for binary {i}: {e}")
+        
         # Trigger auto-fills if enabled
         if params_dyn['af_enabled']:
             auto_fill_events = trigger_auto_fills(state, i, X, is_buy, params_dyn, current_time)
             events.extend(auto_fill_events)
         events.append({'type': 'ORDER_FILLED', 'payload': {'order_id': order['order_id']}})
+
+    # Validate engine state at end of order processing
+    try:
+        validate_engine_state(state, params_dyn)
+    except ValueError as e:
+        # Critical error - the entire order batch should be considered failed
+        raise ValueError(f"Engine state validation failed at end of apply_orders: {e}")
 
     return fills, state, events

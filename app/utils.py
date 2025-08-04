@@ -82,3 +82,155 @@ def safe_divide(num: Decimal, den: Decimal) -> Decimal:
     if den == Decimal(0):
         raise ValueError("Division by zero.")
     return num / den
+
+# State validation functions for limit order invariants (Phase 1.3)
+
+def validate_limit_price_bounds(price: Decimal, p_min: Decimal, p_max: Decimal) -> None:
+    """
+    Validate that limit order price is within TDD bounds [p_min, p_max].
+    
+    Args:
+        price: Limit order price to validate
+        p_min: Minimum allowed price from TDD parameters
+        p_max: Maximum allowed price from TDD parameters
+        
+    Raises:
+        ValueError: If price is outside bounds
+    """
+    if not (p_min <= price <= p_max):
+        raise ValueError(f"Limit price {price} outside bounds [{p_min}, {p_max}]")
+
+def validate_solvency_invariant(binary: Dict[str, Any]) -> None:
+    """
+    Validate TDD solvency invariant: q_yes + q_no < 2 * L.
+    
+    Args:
+        binary: BinaryState dictionary to validate
+        
+    Raises:
+        ValueError: If solvency invariant is violated
+    """
+    q_yes = Decimal(str(binary['q_yes']))
+    q_no = Decimal(str(binary['q_no']))
+    L = Decimal(str(binary['L']))
+    
+    if q_yes + q_no >= Decimal('2') * L:
+        raise ValueError(f"Solvency violation: q_yes({q_yes}) + q_no({q_no}) >= 2*L({L})")
+
+def validate_lob_pool_consistency(pool: Dict[str, Any]) -> None:
+    """
+    Validate LOB pool internal consistency: volume matches sum of user shares.
+    
+    Note: This function validates basic consistency (volume = sum of shares).
+    For semantic validation (buy vs sell pool semantics), use validate_lob_pool_volume_semantics.
+    
+    Args:
+        pool: LOB pool dictionary with 'volume' and 'shares' keys
+        
+    Raises:
+        ValueError: If pool volume doesn't match user shares
+    """
+    if 'volume' not in pool or 'shares' not in pool:
+        return  # Empty pool is valid
+    
+    pool_volume = Decimal(str(pool['volume']))
+    total_shares = sum(Decimal(str(share)) for share in pool['shares'].values())
+    
+    # Allow small precision differences due to float arithmetic
+    tolerance = Decimal('1e-10')
+    if abs(pool_volume - total_shares) > tolerance:
+        raise ValueError(f"Pool volume {pool_volume} doesn't match total shares {total_shares}")
+
+def validate_lob_pool_volume_semantics(pool: Dict[str, Any], is_buy: bool, tick: int, tick_size: Decimal) -> None:
+    """
+    Validate LOB pool volume semantics per TDD:
+    - Buy pools: volume = USDC amount (shares * price)
+    - Sell pools: volume = token amount (shares)
+    
+    Args:
+        pool: LOB pool dictionary
+        is_buy: True for buy pools, False for sell pools
+        tick: Price tick for the pool
+        tick_size: Tick size parameter
+        
+    Raises:
+        ValueError: If volume semantics are incorrect
+    """
+    if 'volume' not in pool or 'shares' not in pool:
+        return  # Empty pool is valid
+    
+    pool_volume = Decimal(str(pool['volume']))
+    total_shares = sum(Decimal(str(share)) for share in pool['shares'].values())
+    # Use absolute value of tick since pool keys can be negative for non-opt-in orders
+    price = Decimal(abs(tick)) * tick_size
+    
+    if is_buy:
+        # Buy pools: volume should be USDC amount (shares * price)
+        expected_volume = total_shares * price
+    else:
+        # Sell pools: volume should be token amount (shares)
+        expected_volume = total_shares
+    
+    # Allow small precision differences
+    tolerance = Decimal('1e-10')
+    if abs(pool_volume - expected_volume) > tolerance:
+        raise ValueError(f"Pool volume semantics violation: expected {expected_volume}, got {pool_volume}")
+
+def validate_binary_state(binary: Dict[str, Any], params: Dict[str, Any] = None) -> None:
+    """
+    Comprehensive validation of binary state invariants.
+    
+    Args:
+        binary: BinaryState dictionary to validate
+        params: Optional engine parameters for price bounds validation
+        
+    Raises:
+        ValueError: If any invariant is violated
+    """
+    # Basic state invariants
+    if binary['subsidy'] < 0:
+        raise ValueError(f"Negative subsidy: {binary['subsidy']}")
+    
+    if binary['L'] <= 0:
+        raise ValueError(f"Non-positive liquidity: {binary['L']}")
+    
+    expected_L = Decimal(str(binary['V'])) + Decimal(str(binary['subsidy']))
+    actual_L = Decimal(str(binary['L']))
+    if abs(actual_L - expected_L) > Decimal('1e-10'):
+        raise ValueError(f"L invariant violation: L={actual_L}, V+subsidy={expected_L}")
+    
+    # Solvency invariant
+    validate_solvency_invariant(binary)
+    
+    # LOB pool consistency
+    if 'lob_pools' in binary:
+        tick_size = Decimal(str(params.get('tick_size', '0.01'))) if params else Decimal('0.01')
+        
+        for token in ['YES', 'NO']:
+            for side in ['buy', 'sell']:
+                pools = binary['lob_pools'][token][side]
+                for tick, pool in pools.items():
+                    validate_lob_pool_volume_semantics(pool, side == 'buy', int(tick), tick_size)
+
+def validate_engine_state(state: Dict[str, Any], params: Dict[str, Any] = None) -> None:
+    """
+    Comprehensive validation of entire engine state.
+    
+    Args:
+        state: EngineState dictionary to validate
+        params: Optional engine parameters for validation
+        
+    Raises:
+        ValueError: If any state invariant is violated
+    """
+    if 'binaries' not in state:
+        raise ValueError("Missing binaries in engine state")
+    
+    for binary in state['binaries']:
+        validate_binary_state(binary, params)
+    
+    # Validate pre_sum_yes if present
+    if 'pre_sum_yes' in state:
+        # This is used for multi-resolution renormalization
+        if state['pre_sum_yes'] <= 0:
+            raise ValueError(f"Invalid pre_sum_yes: {state['pre_sum_yes']}")

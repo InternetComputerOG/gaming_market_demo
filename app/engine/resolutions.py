@@ -4,7 +4,7 @@ from typing_extensions import TypedDict
 
 from .state import EngineState, BinaryState, get_binary, update_subsidies, get_p_yes
 from .params import EngineParams
-from app.utils import safe_divide, usdc_amount
+from app.utils import safe_divide, usdc_amount, validate_binary_state, validate_solvency_invariant, validate_engine_state
 from app.db.queries import fetch_positions
 
 def trigger_resolution(
@@ -60,6 +60,16 @@ def trigger_resolution(
         V -= total_q_no
         binary['V'] = float(V)
         update_subsidies(state, params)
+        
+        # Validate binary state after elimination
+        try:
+            validate_solvency_invariant(binary)
+        except ValueError as e:
+            # Rollback the elimination
+            binary['V'] = float(V + total_q_no)
+            binary['active'] = True
+            update_subsidies(state, params)
+            raise ValueError(f"Resolution validation failed during elimination: {e}")
 
         freed = L - total_q_no
         freed_total += freed
@@ -82,6 +92,20 @@ def trigger_resolution(
             V_b += added
             b['V'] = float(V_b)
         update_subsidies(state, params)
+        
+        # Validate remaining binaries after redistribution
+        for b in remaining_active:
+            try:
+                validate_binary_state(b, params)
+                validate_solvency_invariant(b)
+            except ValueError as e:
+                # Rollback redistribution
+                for b_rollback in remaining_active:
+                    V_rollback = Decimal(str(b_rollback['V']))
+                    V_rollback -= added
+                    b_rollback['V'] = float(V_rollback)
+                update_subsidies(state, params)
+                raise ValueError(f"Resolution validation failed during redistribution: {e}")
 
     post_redist_sum = sum(Decimal(str(get_p_yes(b))) for b in remaining_active)
     if post_redist_sum > Decimal('0'):
@@ -113,6 +137,15 @@ def trigger_resolution(
         V_w -= total_q_yes
         winner_binary['V'] = float(V_w)
         update_subsidies(state, params)
+        
+        # Validate winner binary after final payout
+        try:
+            validate_solvency_invariant(winner_binary)
+        except ValueError as e:
+            # Rollback final payout
+            winner_binary['V'] = float(V_w + total_q_yes)
+            update_subsidies(state, params)
+            raise ValueError(f"Resolution validation failed during final payout: {e}")
 
         events.append({
             'type': 'FINAL_PAYOUT',

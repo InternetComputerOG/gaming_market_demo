@@ -2,7 +2,7 @@ from typing import List, Dict, Any, Optional
 from typing_extensions import TypedDict
 from decimal import Decimal
 
-from app.db.queries import fetch_positions, update_position, update_metrics, get_db
+from app.db.queries import fetch_positions, update_position, update_user_position, fetch_user_position, update_user_balance, fetch_user_balance, update_metrics, get_db
 from app.engine.state import EngineState, BinaryState, get_binary
 from app.utils import usdc_amount, validate_balance_buy, validate_balance_sell, validate_size, safe_divide
 
@@ -31,44 +31,89 @@ def fetch_user_positions(user_id: str) -> List[Dict[str, Any]]:
 
 def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
     """
-    Update user position and engine state based on a fill.
-    Ties to TDD: Adjusts actual q_yes/q_no in state and DB post-fill; preserves q < L_i via engine invariants.
-    Handles both buy (increase tokens) and sell (decrease tokens).
+    Update user positions and balances based on a fill from the engine.
+    
+    Phase 3.2: Correctly handles both buyer and seller position updates,
+    integrates new fee structure from Phase 3.1, maintains balance consistency,
+    and updates engine state token quantities per TDD specifications.
+    
+    Args:
+        fill: Fill data from engine containing buy_user_id, sell_user_id, outcome_i,
+              yes_no, price, size, fee, etc.
+        state: Engine state to update with new token quantities (q_yes, q_no)
+    
+    Ties to TDD: Updates individual user positions per (user_id, outcome_i, yes_no),
+    adjusts balances for trading costs and proceeds with proper fee handling,
+    and updates engine state q_yes_i += Δ, q_no_i += Δ per cross-matching mechanics.
     """
-    user_id = fill['buy_user_id'] if fill['yes_no'] == 'YES' else fill['sell_user_id']  # Simplified; adjust per fill type
-    outcome_i = fill['outcome_i']
-    yes_no = fill['yes_no']
-    size = usdc_amount(fill['size'])
-    is_buy = 'buy_user_id' in fill  # Detect based on fill keys; assume buy for buyer
-
-    binary = get_binary(state, outcome_i)
-    if yes_no == 'YES':
-        current_tokens = binary['q_yes']
-    else:
-        current_tokens = binary['q_no']
-
-    if is_buy:
-        new_tokens = current_tokens + size
-        validate_size(size)  # Ensure positive size
-    else:
-        new_tokens = current_tokens - size
-        if new_tokens < Decimal('0'):
-            raise ValueError("Insufficient tokens for sell")
-
-    # Update engine state (actual q, not virtual)
-    if yes_no == 'YES':
-        binary['q_yes'] = new_tokens
-    else:
-        binary['q_no'] = new_tokens
-
-    # DB update
-    update_position(user_id, outcome_i, float(binary['q_yes']), float(binary['q_no']))
-
-    # Update user metrics (trade_count increment)
-    db = get_db()
-    user_data = db.table('users').select('*').eq('user_id', user_id).execute().data[0]
-    new_trade_count = user_data['trade_count'] + 1
-    db.table('users').update({'trade_count': new_trade_count}).eq('user_id', user_id).execute()
+    try:
+        # Extract fill data
+        buy_user_id = fill['buy_user_id']
+        sell_user_id = fill['sell_user_id']
+        outcome_i = fill['outcome_i']
+        yes_no = fill['yes_no']  # Token type being traded ('YES' or 'NO')
+        price = Decimal(str(fill['price']))
+        size = Decimal(str(fill['size']))  # Number of tokens traded
+        fee = Decimal(str(fill['fee']))  # Total trading fee
+        
+        validate_size(float(size))  # Ensure positive size
+        
+        # Calculate transaction amounts
+        total_cost = price * size  # Total cost for the tokens
+        fee_per_user = fee / Decimal('2')  # Split fee between buyer and seller
+        
+        # Update buyer position (gains tokens)
+        buyer_current_tokens = Decimal(str(fetch_user_position(buy_user_id, outcome_i, yes_no)))
+        buyer_new_tokens = buyer_current_tokens + size
+        update_user_position(buy_user_id, outcome_i, yes_no, float(buyer_new_tokens))
+        
+        # Update seller position (loses tokens)
+        seller_current_tokens = Decimal(str(fetch_user_position(sell_user_id, outcome_i, yes_no)))
+        seller_new_tokens = seller_current_tokens - size
+        if seller_new_tokens < Decimal('0'):
+            raise ValueError(f"Insufficient tokens for sell: user {sell_user_id} has {seller_current_tokens} {yes_no} tokens, trying to sell {size}")
+        update_user_position(sell_user_id, outcome_i, yes_no, float(seller_new_tokens))
+        
+        # Update buyer balance (pays cost + fee)
+        buyer_balance = Decimal(str(fetch_user_balance(buy_user_id)))
+        buyer_charge = total_cost + fee_per_user
+        buyer_new_balance = buyer_balance - buyer_charge
+        if buyer_new_balance < Decimal('0'):
+            raise ValueError(f"Insufficient balance for buy: user {buy_user_id} has {buyer_balance}, needs {buyer_charge}")
+        update_user_balance(buy_user_id, float(buyer_new_balance))
+        
+        # Update seller balance (receives proceeds - fee)
+        seller_balance = Decimal(str(fetch_user_balance(sell_user_id)))
+        seller_proceeds = total_cost - fee_per_user
+        seller_new_balance = seller_balance + seller_proceeds
+        update_user_balance(sell_user_id, float(seller_new_balance))
+        
+        # Update engine state token quantities per TDD cross-matching mechanics
+        # TDD Line 175: "Update q_yes_i += Δ, q_no_i += Δ"
+        binary = get_binary(state, outcome_i)
+        binary['q_yes'] = float(Decimal(str(binary['q_yes'])) + size)
+        binary['q_no'] = float(Decimal(str(binary['q_no'])) + size)
+        
+        # Update trade counts for both users
+        db = get_db()
+        
+        # Update buyer trade count
+        buyer_data = db.table('users').select('trade_count').eq('user_id', buy_user_id).execute().data
+        if buyer_data:
+            buyer_trade_count = buyer_data[0]['trade_count'] + 1
+            db.table('users').update({'trade_count': buyer_trade_count}).eq('user_id', buy_user_id).execute()
+        
+        # Update seller trade count
+        seller_data = db.table('users').select('trade_count').eq('user_id', sell_user_id).execute().data
+        if seller_data:
+            seller_trade_count = seller_data[0]['trade_count'] + 1
+            db.table('users').update({'trade_count': seller_trade_count}).eq('user_id', sell_user_id).execute()
+            
+    except Exception as e:
+        # Log the error with context for debugging
+        print(f"Error in update_position_from_fill: {e}")
+        print(f"Fill data: {fill}")
+        raise ValueError(f"Failed to update positions from fill: {e}")
 
 def apply_payouts(resolution_data: Dict[str, Any], state: EngineState) -> None:
     """

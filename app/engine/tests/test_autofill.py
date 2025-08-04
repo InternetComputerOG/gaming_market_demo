@@ -133,10 +133,13 @@ def test_update_pool_and_get_deltas():
     charge = Decimal('300')
     is_buy = True
     position_deltas, balance_deltas = update_pool_and_get_deltas(pool, delta, charge, is_buy)
-    assert pool['volume'] == Decimal('500')
-    assert sum(pool['shares'].values()) == Decimal('500')
-    assert position_deltas['user1'] == Decimal('300')  # Pro-rata
-    assert position_deltas['user2'] == Decimal('200')
+    # For buy pools: volume reduced by charge (USDC amount)
+    assert pool['volume'] == Decimal('700')  # 1000 - 300
+    # For buy pools: shares reduced by pro-rata portion of charge
+    assert sum(pool['shares'].values()) == Decimal('700')  # 1000 - 300
+    # Position deltas: users get tokens pro-rata based on their share of original volume
+    assert position_deltas['user1'] == Decimal('300')  # (600/1000) * 500 = 300 tokens
+    assert position_deltas['user2'] == Decimal('200')  # (400/1000) * 500 = 200 tokens
     assert balance_deltas['user1'] == Decimal('-180') if is_buy else Decimal('180')
 
 def test_apply_rebates():
@@ -152,7 +155,11 @@ def test_apply_rebates():
 def test_auto_fill_buy_diversion(default_params: EngineParams, initial_state: EngineState):
     # Use the binary at index 1 (same as auto_fill will use)
     binary = initial_state['binaries'][1]
-    add_sample_pools(binary, True, True, 60, Decimal('1000'), {'user1': Decimal('1000')})  # Tick 0.60 buy YES
+    # For buy pools: volume = shares * price. Tick 60 = price 0.60, so 1000 shares = 600 USDC volume
+    tick_price = Decimal('60') * default_params['tick_size']  # 0.60
+    shares = Decimal('1000')
+    volume = shares * tick_price  # 600 USDC
+    add_sample_pools(binary, True, True, 60, volume, {'user1': shares})  # Tick 0.60 buy YES
     diversion = Decimal('100')
     total_surplus, events = auto_fill(initial_state, 1, diversion, default_params)
     assert total_surplus > Decimal('0')

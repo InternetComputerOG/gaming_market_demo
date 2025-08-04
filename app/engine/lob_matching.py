@@ -4,7 +4,7 @@ from typing_extensions import TypedDict
 
 from .state import EngineState, BinaryState, get_binary, update_subsidies
 from .params import EngineParams
-from app.utils import usdc_amount, price_value, validate_price, validate_size, safe_divide
+from app.utils import usdc_amount, price_value, validate_price, validate_size, safe_divide, validate_lob_pool_volume_semantics
 from .amm_math import get_effective_p_yes, get_effective_p_no
 
 
@@ -80,6 +80,21 @@ def add_to_lob_pool(
     if user_id not in pool['shares']:
         pool['shares'][user_id] = Decimal('0')
     pool['shares'][user_id] += amount  # User shares always track token amount
+    
+    # Note: We don't validate pool consistency here because buy pools store USDC volume
+    # while shares store token amounts, so volume != sum(shares) for buy pools.
+    # The proper validation is done by validate_lob_pool_volume_semantics in validate_binary_state.
+    
+    # Validate pool volume semantics
+    try:
+        validate_lob_pool_volume_semantics(pool, is_buy, tick, tick_size)
+    except ValueError as e:
+        # Rollback the pool update
+        pool['volume'] -= volume_to_add
+        pool['shares'][user_id] -= amount
+        if pool['shares'][user_id] == Decimal('0'):
+            del pool['shares'][user_id]
+        raise ValueError(f"LOB pool volume semantics validation failed: {e}")
 
 
 def cancel_from_pool(
@@ -190,9 +205,48 @@ def cross_match_binary(
             binary['q_yes'] = float(Decimal(binary['q_yes']) + fill)
             binary['q_no'] = float(Decimal(binary['q_no']) + fill)
             
-            # Reduce pool volumes with correct semantics
+            # Reduce pool volumes with correct semantics and update shares proportionally
+            # Store original volumes for proportional share reduction
+            original_volume_yes = pool_yes['volume']
+            original_volume_no = pool_no['volume']
+            
             pool_yes['volume'] -= fill * price_yes  # Reduce USDC volume
             pool_no['volume'] -= fill   # Reduce NO tokens available
+            
+            # Update shares proportionally to maintain volume semantics
+            if original_volume_yes > Decimal('0'):
+                ratio_yes = pool_yes['volume'] / original_volume_yes
+                for user in list(pool_yes['shares'].keys()):
+                    pool_yes['shares'][user] *= ratio_yes
+                    if pool_yes['shares'][user] <= Decimal('0'):
+                        del pool_yes['shares'][user]
+            
+            if original_volume_no > Decimal('0'):
+                ratio_no = pool_no['volume'] / original_volume_no
+                for user in list(pool_no['shares'].keys()):
+                    pool_no['shares'][user] *= ratio_no
+                    if pool_no['shares'][user] <= Decimal('0'):
+                        del pool_no['shares'][user]
+            
+            # Validate pool consistency after volume reduction
+            pools_to_validate = []
+            if pool_yes['volume'] > Decimal('0'):
+                pools_to_validate.append((pool_yes, True, tick_yes, params['tick_size']))
+            if pool_no['volume'] > Decimal('0'):
+                pools_to_validate.append((pool_no, False, tick_no, params['tick_size']))
+            
+            for pool, is_buy_pool, tick, tick_size in pools_to_validate:
+                try:
+                    validate_lob_pool_volume_semantics(pool, is_buy_pool, tick, tick_size)
+                except ValueError as e:
+                    # Critical error - rollback the entire cross-match operation
+                    pool_yes['volume'] += fill * price_yes
+                    pool_no['volume'] += fill
+                    binary['V'] = float(Decimal(binary['V']) - (price_yes + price_no) * fill + fee)
+                    binary['q_yes'] = float(Decimal(binary['q_yes']) - fill)
+                    binary['q_no'] = float(Decimal(binary['q_no']) - fill)
+                    update_subsidies(state, params)  # Restore subsidies
+                    raise ValueError(f"LOB pool validation failed during cross-matching: {e}")
             
             # Clean up pools if completely consumed
             if pool_yes['volume'] <= Decimal('0'):
@@ -326,23 +380,26 @@ def match_market_order(
                 'ts_ms': current_ts,
             })
             
+            # Store original volume for proportional share reduction
+            original_volume = pool['volume']
+            
             # Update pool volume
             if is_buy:
                 pool['volume'] -= fill
             else:
                 pool['volume'] -= fill * price
-                
+            
+            # Update shares proportionally to maintain volume semantics
+            if original_volume > Decimal('0'):
+                ratio = pool['volume'] / original_volume
+                for user in list(pool['shares'].keys()):
+                    pool['shares'][user] *= ratio
+                    if pool['shares'][user] <= Decimal('0'):
+                        del pool['shares'][user]
+            
             # Clean up empty pools
             if pool['volume'] <= Decimal('0'):
                 del pools[k]
-            else:
-                # Update shares proportionally
-                if is_buy:
-                    ratio = pool['volume'] / (pool['volume'] + fill)
-                else:
-                    ratio = pool['volume'] / (pool['volume'] + fill * price)
-                for user in pool['shares']:
-                    pool['shares'][user] *= ratio
                     
             remaining -= fill
             

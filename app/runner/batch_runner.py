@@ -22,6 +22,7 @@ from app.engine.state import EngineState
 from app.engine.params import EngineParams
 from app.services.ticks import compute_summary, create_tick
 from app.services.realtime import publish_tick_update
+from app.services.positions import update_position_from_fill
 
 # Assume no atomic_transaction context manager; use sequential calls for demo
 # If errors, manual rollback not implemented (demo-scale)
@@ -66,52 +67,19 @@ def run_tick():
             filled_qty = event.get('filled_qty')
             update_order_status(order_id, status, filled_qty)
 
-    # Update positions and balances from fills
-    user_deltas: Dict[str, Dict[str, Decimal]] = {}  # user_id: {'balance_delta': Decimal, 'positions': {outcome_i_yes_no: delta}}
+    # Update positions and balances from fills using the centralized service function
+    # This ensures both user positions AND engine state are updated consistently per TDD Phase 3.2
     for fill in fills:
-        buy_user = fill['buy_user_id']
-        sell_user = fill['sell_user_id']
-        outcome_i = fill['outcome_i']
-        yes_no = fill['yes_no']
-        size = fill['size']
-        price = fill['price']
-        fee = fill['fee']
-
-        # Buy side
-        if buy_user not in user_deltas:
-            user_deltas[buy_user] = {'balance_delta': Decimal(0), 'positions': {}}
-        user_deltas[buy_user]['balance_delta'] -= size * price + fee / Decimal(2)  # Assume fee split
-        pos_key = f"{outcome_i}_{yes_no}"
-        if pos_key not in user_deltas[buy_user]['positions']:
-            user_deltas[buy_user]['positions'][pos_key] = Decimal(0)
-        user_deltas[buy_user]['positions'][pos_key] += size
-
-        # Sell side
-        if sell_user not in user_deltas:
-            user_deltas[sell_user] = {'balance_delta': Decimal(0), 'positions': {}}
-        user_deltas[sell_user]['balance_delta'] += size * price - fee / Decimal(2)
-        if pos_key not in user_deltas[sell_user]['positions']:
-            user_deltas[sell_user]['positions'][pos_key] = Decimal(0)
-        user_deltas[sell_user]['positions'][pos_key] -= size
-
-    # Apply deltas to DB (update_position and update_user_balance)
-    for user_id, deltas in user_deltas.items():
-        for pos_key, delta in deltas['positions'].items():
-            outcome_i, yes_no = pos_key.split('_')
-            # Fetch current, update
-            current_pos = fetch_positions(user_id=user_id)  # Assume returns list, find matching
-            q_yes = Decimal(0)
-            q_no = Decimal(0)
-            for pos in current_pos:
-                if pos['outcome_i'] == int(outcome_i) and pos['yes_no'] == yes_no:
-                    if yes_no == 'YES':
-                        q_yes = pos['tokens'] + delta
-                    else:
-                        q_no = pos['tokens'] + delta
-            update_position(user_id, int(outcome_i), q_yes, q_no)
-        # Update balance
-        # Assume update_user_balance(user_id, deltas['balance_delta'])  # Incremental
-        # But from queries, update_user_balance not explicit, assume exists or raw update
+        try:
+            # Use the properly implemented service function that handles:
+            # - Both buyer and seller position updates
+            # - Engine state token quantity updates (q_yes, q_no)
+            # - Proper fee handling per TDD specifications
+            # - Balance consistency and validation
+            update_position_from_fill(fill, new_state)
+        except Exception as e:
+            print(f"Error updating position from fill {fill['trade_id']}: {e}")
+            # Continue processing other fills rather than failing the entire batch
 
     # lob_pools updated in state, saved below
 
