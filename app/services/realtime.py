@@ -4,7 +4,7 @@ from supabase import Client
 
 from app.config import get_supabase_client
 from app.db.queries import fetch_engine_state, get_current_tick
-from app.utils import serialize_state
+from app.utils import serialize_state, get_current_ms
 
 def get_realtime_client() -> Client:
     """Get Supabase client for realtime operations."""
@@ -67,6 +67,16 @@ def publish_resolution_update(is_final: bool, elim_outcomes: Any) -> None:
     """Publish resolution event to 'demo' channel."""
     payload = {
         "is_final": is_final,
-        "elim_outcomes": elim_outcomes
+        "elim_outcomes": elim_outcomes,
+        "timestamp": get_current_ms()
     }
     publish_event("demo", "resolution_update", payload)
+
+def publish_demo_status_update(status: str, message: str = None) -> None:
+    """Publish demo status change event to 'demo' channel."""
+    payload = {
+        "status": status,
+        "message": message or f"Demo status changed to {status}",
+        "timestamp": get_current_ms()
+    }
+    publish_event("demo", "status_update", payload)

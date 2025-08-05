@@ -33,13 +33,96 @@ user_id = st.session_state['user_id']
 config = load_config()
 status = config['status']
 
+# Enhanced waiting room with realtime status updates
 if status == 'DRAFT':
-    st.write("Waiting for admin to start")
+    st.title("🎮 Gaming Market Demo")
+    st.header("⏳ Waiting Room")
+    
+    # Show joined users count with error handling
+    try:
+        users = client.table('users').select('*').execute().data
+        st.info(f"👥 **{len(users)} players joined** - Waiting for admin to start the demo...")
+    except Exception as e:
+        st.error(f"⚠️ Connection issue: {str(e)}")
+        users = []
+    
+    # Initialize session state for status monitoring
+    if 'last_status_check' not in st.session_state:
+        st.session_state.last_status_check = time.time()
+        st.session_state.refresh_counter = 0
+    
+    # Check for status updates every 3 seconds (controlled refresh)
+    current_time = time.time()
+    time_since_last_check = current_time - st.session_state.last_status_check
+    
+    if time_since_last_check > 3:
+        st.session_state.last_status_check = current_time
+        st.session_state.refresh_counter += 1
+        
+        # Reload config to check for status changes with error handling
+        try:
+            fresh_config = load_config()
+            if fresh_config['status'] != 'DRAFT':
+                st.success("🚀 Demo is starting! Redirecting to trading interface...")
+                time.sleep(1)  # Brief pause for user to see the message
+                st.rerun()
+            else:
+                # Only refresh if we haven't refreshed too many times
+                if st.session_state.refresh_counter < 100:  # Prevent infinite loops
+                    st.rerun()
+        except Exception as e:
+            st.warning(f"⚠️ Could not check status: {str(e)}")
+            # Continue without refreshing if there's an error
+    
+    # Manual refresh button
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        if st.button("🔄 Check Status", type="primary"):
+            st.session_state.refresh_counter = 0  # Reset counter on manual refresh
+            st.rerun()
+    
+    # Show current players
+    if users:
+        st.subheader("👥 Joined Players")
+        player_names = [user['display_name'] for user in users]
+        # Display players in a nice grid
+        cols = st.columns(min(3, len(player_names)))
+        for i, name in enumerate(player_names):
+            with cols[i % len(cols)]:
+                st.write(f"• {name}")
+    
+    # Status notification area
+    with st.container():
+        st.markdown("---")
+        col_status1, col_status2 = st.columns(2)
+        with col_status1:
+            st.caption(f"🔄 Auto-checking every 3 seconds... (Check #{st.session_state.refresh_counter})")
+        with col_status2:
+            if time_since_last_check < 1:
+                st.caption("🟢 Just checked - Status: DRAFT")
+            else:
+                st.caption(f"⏱️ Next check in {max(0, 3 - int(time_since_last_check))} seconds")
+    
     st.stop()
 
 if status == 'FROZEN':
-    st.write("Trading frozen")
-    if st.button("Refresh"):
+    st.warning("⏸️ **Trading is currently frozen**")
+    st.info("The admin has temporarily paused trading. Please wait for trading to resume.")
+    
+    # Auto-refresh for frozen status too
+    if 'last_frozen_check' not in st.session_state:
+        st.session_state.last_frozen_check = time.time()
+    
+    current_time = time.time()
+    if current_time - st.session_state.last_frozen_check > 2:
+        st.session_state.last_frozen_check = current_time
+        fresh_config = load_config()
+        if fresh_config['status'] != 'FROZEN':
+            st.success("✅ Trading has resumed!")
+            time.sleep(1)
+            st.rerun()
+    
+    if st.button("🔄 Check Status"):
         st.rerun()
     st.stop()
 
@@ -61,7 +144,23 @@ if 'start_ts_ms' in config and config['start_ts_ms']:
     start_ms = int(config['start_ts_ms'])
 elif 'start_ts' in config and config['start_ts']:
     # Parse ISO timestamp and convert to milliseconds
-    start_dt = datetime.fromisoformat(config['start_ts'].replace('Z', '+00:00'))
+    # Handle timestamps with variable decimal precision
+    timestamp_str = config['start_ts'].replace('Z', '+00:00')
+    
+    # Fix decimal precision issue: pad or truncate to 6 digits after decimal
+    import re
+    if '.' in timestamp_str:
+        # Split at the decimal point
+        before_decimal, after_decimal_and_tz = timestamp_str.split('.', 1)
+        # Extract decimal digits and timezone
+        decimal_match = re.match(r'(\d+)(.*)', after_decimal_and_tz)
+        if decimal_match:
+            decimal_digits, tz_part = decimal_match.groups()
+            # Pad or truncate to exactly 6 digits (microseconds)
+            decimal_digits = decimal_digits.ljust(6, '0')[:6]
+            timestamp_str = f"{before_decimal}.{decimal_digits}{tz_part}"
+    
+    start_dt = datetime.fromisoformat(timestamp_str)
     start_ms = int(start_dt.timestamp() * 1000)
 else:
     # Fallback to current time if no start time is set

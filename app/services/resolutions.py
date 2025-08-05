@@ -43,9 +43,48 @@ def trigger_resolution_service(is_final: bool, elim_outcomes: Union[List[int], i
     virtual = target * L - q_yes, cap >=0 if vc_enabled). Solvency: actual q < L preserved; virtual pricing only."""
     client: Client = get_supabase_client()
     
-    # Load config and params
+    # Load config and params with robust initialization
     config: Dict[str, Any] = load_config()
-    params: EngineParams = config.get('params', {})
+    
+    # Ensure params is properly initialized with defaults
+    from app.config import get_default_engine_params
+    default_params = get_default_engine_params()
+    
+    # Robust params initialization that handles all edge cases
+    if config and 'params' in config and config['params'] and isinstance(config['params'], dict):
+        # Merge config params with defaults, ensuring all required keys exist
+        config_params = config['params']
+        params: EngineParams = default_params.copy()
+        
+        # Only update params that exist in both default and config
+        for key, default_value in default_params.items():
+            if key in config_params and config_params[key] is not None:
+                try:
+                    if isinstance(default_value, (int, float)):
+                        params[key] = type(default_value)(config_params[key])
+                    else:
+                        params[key] = config_params[key]
+                except (ValueError, TypeError):
+                    # If conversion fails, keep default
+                    params[key] = default_value
+    else:
+        # Config is empty, malformed, or params is missing - use defaults
+        params: EngineParams = default_params.copy()
+        print(f"Warning: Using default parameters in resolution service. Config params: {config.get('params', 'MISSING')}")
+    
+    # Debug: Print critical parameters to verify they exist
+    critical_params = ['z', 'n_outcomes', 'gamma', 'q0']
+    print(f"Resolution service params check:")
+    for param in critical_params:
+        if param in params:
+            print(f"  {param}: {params[param]} (type: {type(params[param])})")
+        else:
+            print(f"  {param}: MISSING!")
+    
+    # Ensure critical parameters exist with fallbacks
+    if 'z' not in params or params['z'] is None:
+        params['z'] = default_params['z']
+        print(f"  Fixed missing 'z' parameter with default: {params['z']}")
     
     # Check toggles
     if not params.get('mr_enabled', False) and not is_final:

@@ -10,7 +10,7 @@ from matplotlib.figure import Figure
 from app.config import get_supabase_client, EngineParams, get_default_engine_params
 from app.db.queries import load_config, update_config, fetch_users, get_current_tick
 from app.utils import get_current_ms
-from app.services.realtime import publish_resolution_update
+from app.services.realtime import publish_resolution_update, publish_demo_status_update
 from app.services.resolutions import trigger_resolution_service
 from app.scripts.export_csv import fetch_trades, fetch_metrics, export_config_csv, export_rankings_csv
 from app.scripts.generate_graph import generate_graph
@@ -33,6 +33,141 @@ ADMIN_PASSWORD = env.get('ADMIN_PASSWORD')
 
 def get_client() -> Client:
     return get_supabase_client()
+
+def reset_demo_state():
+    """
+    Completely reset the demo state by clearing all relevant database tables
+    and resetting the config to DRAFT status.
+    """
+    try:
+        client = get_client()
+        
+        # Clear all demo-related tables using proper delete syntax
+        # We'll delete all records (no dummy condition needed)
+        
+        # 1. Clear users table (joined users list) - most important for user's issue
+        try:
+            # First, check if there are users to delete
+            users_before = client.table('users').select('user_id').execute()
+            if users_before.data:
+                # Delete all users using a more reliable method
+                for user in users_before.data:
+                    try:
+                        client.table('users').delete().eq('user_id', user['user_id']).execute()
+                    except Exception as e:
+                        st.warning(f"Could not delete user {user['user_id']}: {e}")
+                        
+                # Verify deletion worked
+                users_after = client.table('users').select('user_id').execute()
+                if users_after.data:
+                    st.warning(f"Warning: {len(users_after.data)} users still remain after reset")
+                else:
+                    st.success("✅ Users table cleared successfully")
+            else:
+                st.info("Users table was already empty")
+        except Exception as e:
+            st.error(f"Error clearing users table: {e}")
+            
+        # Clear other tables using the same reliable method
+        tables_to_clear = [
+            ('positions', 'position_id'),
+            ('orders', 'order_id'), 
+            ('lob_pools', 'pool_id'),
+            ('trades', 'trade_id'),
+            ('events', 'event_id'),
+            ('metrics', 'metric_id')
+        ]
+        
+        for table_name, id_field in tables_to_clear:
+            try:
+                # Get all records first
+                records = client.table(table_name).select(id_field).execute()
+                if records.data:
+                    # Delete each record individually for reliability
+                    for record in records.data:
+                        try:
+                            client.table(table_name).delete().eq(id_field, record[id_field]).execute()
+                        except:
+                            pass  # Continue with other records
+            except:
+                pass  # Table might not exist or be empty
+                
+        # Special handling for ticks table (numeric ID)
+        try:
+            ticks = client.table('ticks').select('tick_id').execute()
+            if ticks.data:
+                for tick in ticks.data:
+                    try:
+                        client.table('ticks').delete().eq('tick_id', tick['tick_id']).execute()
+                    except:
+                        pass
+        except:
+            pass
+        
+        # 9. Reset config to DRAFT state with default parameters and proper engine state
+        default_params = get_default_engine_params()
+        
+        # Initialize proper engine state according to TDD specification
+        from app.engine.state import init_state
+        fresh_engine_state = init_state(default_params)
+        
+        reset_config = {
+            'status': 'DRAFT',
+            'params': default_params,
+            'current_round': 0,
+            'engine_state': fresh_engine_state
+        }
+        
+        # Update the config and verify it worked
+        try:
+            update_config(reset_config)
+            st.info("Config reset to DRAFT status")
+            
+            # Verify the status was actually set
+            updated_config = load_config()
+            actual_status = updated_config.get('status', 'UNKNOWN')
+            
+            if actual_status == 'DRAFT':
+                st.success(f"✅ Status successfully reset to '{actual_status}'")
+            else:
+                st.warning(f"⚠️ Status is '{actual_status}' instead of 'DRAFT' - trying direct update")
+                
+                # Try a more direct approach if the first attempt failed
+                # First get the config_id to target the right record
+                existing = client.table('config').select('config_id').execute()
+                if existing.data:
+                    config_id = existing.data[0]['config_id']
+                    client.table('config').update({'status': 'DRAFT'}).eq('config_id', config_id).execute()
+                    st.info(f"Direct update targeted config_id: {config_id}")
+                else:
+                    st.error("No config record found to update")
+                
+                # Verify again
+                final_config = load_config()
+                final_status = final_config.get('status', 'UNKNOWN')
+                st.info(f"Final status after direct update: '{final_status}'")
+                
+        except Exception as config_error:
+            st.error(f"Error updating config: {config_error}")
+            # Try direct database update as fallback
+            try:
+                # Get the config_id to target the right record
+                existing = client.table('config').select('config_id').execute()
+                if existing.data:
+                    config_id = existing.data[0]['config_id']
+                    client.table('config').update({'status': 'DRAFT'}).eq('config_id', config_id).execute()
+                    st.info(f"Used direct database update as fallback (config_id: {config_id})")
+                else:
+                    st.error("No config record found for fallback update")
+            except Exception as direct_error:
+                st.error(f"Direct update also failed: {direct_error}")
+                return False
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error resetting demo state: {str(e)}")
+        return False
 
 def download_csv(data: List[Dict[str, Any]], filename: str) -> bytes:
     df = pd.DataFrame(data)
@@ -62,8 +197,153 @@ def run_admin_app():
     client = get_client()
     config = load_config()
     status = config.get('status', 'DRAFT')
-    params: EngineParams = config.get('params', get_default_engine_params())
-
+    
+    # Ensure params is properly initialized with defaults (moved here to use in status dashboard)
+    default_params = get_default_engine_params()
+    params: EngineParams = default_params.copy()  # Initialize with defaults first
+    
+    # Robust params initialization that handles all edge cases
+    try:
+        if config and 'params' in config and config['params'] and isinstance(config['params'], dict):
+            # Merge config params with defaults, ensuring defaults take precedence for missing keys
+            config_params = config['params']
+            
+            # First, update params with values from default_params
+            for key, default_value in default_params.items():
+                if key in config_params and config_params[key] is not None:
+                    # Preserve the type from defaults
+                    try:
+                        if isinstance(default_value, (int, float)):
+                            params[key] = type(default_value)(config_params[key])
+                        else:
+                            params[key] = config_params[key]
+                    except (ValueError, TypeError):
+                        # If conversion fails, keep default
+                        params[key] = default_value
+                else:
+                    # Key missing or None in config, use default
+                    params[key] = default_value
+            
+            # Then, add any additional runtime fields from config_params that aren't in defaults
+            # This preserves fields like start_ts_ms, current_round, etc.
+            for key, value in config_params.items():
+                if key not in default_params and value is not None:
+                    params[key] = value
+                    
+            # Ensure critical parameters are never missing
+            critical_params = ['n_outcomes', 'z', 'gamma', 'q0', 'f', 'total_duration', 'final_winner']
+            for param in critical_params:
+                if param not in params or params[param] is None:
+                    params[param] = default_params[param]
+                    st.warning(f"Missing critical parameter '{param}', using default: {default_params[param]}")
+                    
+    except Exception as e:
+        # If anything goes wrong, fall back to defaults
+        st.error(f"Config initialization error: {e}. Using default parameters.")
+        params = default_params.copy()
+    
+    # Demo Status Dashboard Section
+    st.markdown("---")
+    st.subheader("🎮 Demo Status")
+    
+    # Status display with visual indicators
+    status_col1, status_col2, status_col3 = st.columns([1, 2, 1])
+    
+    with status_col1:
+        # Status indicator with colors
+        if status == 'DRAFT':
+            st.markdown("**Status:** 🔵 DRAFT")
+        elif status == 'RUNNING':
+            st.markdown("**Status:** 🟢 RUNNING")
+        elif status == 'FROZEN':
+            st.markdown("**Status:** 🟡 FROZEN")
+        elif status == 'RESOLVED':
+            st.markdown("**Status:** 🔴 RESOLVED")
+    
+    with status_col2:
+        # Countdown and progress information
+        if status in ['RUNNING', 'FROZEN']:
+            # Check if demo has started (has start timestamp in params)
+            start_ts_ms = params.get('start_ts_ms', 0)
+            if start_ts_ms > 0:
+                current_ms = get_current_ms()
+                elapsed_ms = current_ms - start_ts_ms
+                elapsed_seconds = elapsed_ms // 1000
+                
+                # Format time display function
+                def format_time(seconds):
+                    mins, secs = divmod(int(seconds), 60)
+                    hours, mins = divmod(mins, 60)
+                    if hours > 0:
+                        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+                    else:
+                        return f"{mins:02d}:{secs:02d}"
+                
+                # Always show elapsed time
+                st.markdown(f"**Elapsed:** {format_time(elapsed_seconds)}")
+                
+                # Get total duration from params
+                total_duration_s = params.get('total_duration', 0)
+                
+                if total_duration_s > 0:
+                    remaining_seconds = max(0, total_duration_s - elapsed_seconds)
+                    
+                    st.markdown(f"**Remaining:** {format_time(remaining_seconds)}")
+                    
+                    # Progress bar
+                    progress = min(1.0, elapsed_seconds / total_duration_s)
+                    st.progress(progress)
+                    
+                    # Show percentage
+                    percentage = int(progress * 100)
+                    st.markdown(f"**Progress:** {percentage}%")
+                else:
+                    st.markdown("**Duration:** Not configured")
+                    st.info("💡 Set 'Total Duration' in configuration to see countdown timer")
+            else:
+                st.markdown("**Status:** Demo starting...")
+                st.info("⏳ Initializing demo systems...")
+        elif status == 'RESOLVED':
+            st.markdown("**Demo Completed!** ✅")
+            start_ts_ms = params.get('start_ts_ms', 0)
+            if start_ts_ms > 0:
+                current_ms = get_current_ms()
+                total_elapsed = (current_ms - start_ts_ms) // 1000
+                def format_time(seconds):
+                    mins, secs = divmod(int(seconds), 60)
+                    hours, mins = divmod(mins, 60)
+                    if hours > 0:
+                        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+                    else:
+                        return f"{mins:02d}:{secs:02d}"
+                st.markdown(f"**Total Duration:** {format_time(total_elapsed)}")
+        else:
+            st.markdown("**Ready to start demo**")
+    
+    with status_col3:
+        # Multi-resolution progress (if enabled)
+        mr_enabled = params.get('mr_enabled', False)
+        if mr_enabled and status in ['RUNNING', 'FROZEN', 'RESOLVED']:
+            current_round = config.get('current_round', 0)
+            res_offsets = params.get('res_offsets', [])
+            total_rounds = len(res_offsets)
+            
+            if total_rounds > 0:
+                st.markdown(f"**Round:** {current_round + 1}/{total_rounds}")
+                round_progress = (current_round + 1) / total_rounds
+                st.progress(round_progress)
+                st.markdown(f"**Round Progress:** {int(round_progress * 100)}%")
+            else:
+                st.markdown("**Multi-Resolution:** Enabled")
+                st.info("Configure resolution offsets to see round progress")
+        elif status in ['RUNNING', 'FROZEN', 'RESOLVED']:
+            # Show single resolution mode info
+            st.markdown("**Mode:** Single Resolution")
+            if status == 'RUNNING':
+                st.markdown("**Next:** Final resolution")
+    
+    st.markdown("---")
+    
     # Config Form
     with st.expander("Configure Session", expanded=status == 'DRAFT'):
         with st.form(key="config_form"):
@@ -71,6 +351,34 @@ def run_admin_app():
 
             with col1:
                 params['n_outcomes'] = st.number_input("Number of Outcomes", min_value=3, max_value=10, value=params['n_outcomes'])
+                
+                # Outcome Names Configuration
+                st.subheader("📝 Outcome Names")
+                # Ensure outcome_names list has the right length
+                current_names = params.get('outcome_names', [])
+                if len(current_names) != params['n_outcomes']:
+                    # Adjust the list to match n_outcomes
+                    if len(current_names) < params['n_outcomes']:
+                        # Add default names for missing outcomes
+                        for i in range(len(current_names), params['n_outcomes']):
+                            current_names.append(f"Outcome {chr(65 + i)}")
+                    else:
+                        # Trim excess names
+                        current_names = current_names[:params['n_outcomes']]
+                    params['outcome_names'] = current_names
+                
+                # Create input fields for each outcome name
+                outcome_names = []
+                for i in range(params['n_outcomes']):
+                    name = st.text_input(
+                        f"Outcome {i + 1} Name", 
+                        value=params['outcome_names'][i] if i < len(params['outcome_names']) else f"Outcome {chr(65 + i)}",
+                        key=f"outcome_name_{i}"
+                    )
+                    outcome_names.append(name)
+                params['outcome_names'] = outcome_names
+                
+                st.divider()
                 params['z'] = st.number_input("Initial Subsidy (Z)", min_value=0.0, value=params['z'])
                 params['gamma'] = st.number_input("Subsidy Phase-Out Rate (γ)", min_value=0.0, max_value=0.001, value=params['gamma'], format="%.6f")
                 params['q0'] = st.number_input("Initial Virtual Supply (q0)", min_value=0.0, value=params['q0'])
@@ -139,25 +447,83 @@ def run_admin_app():
 
     # Controls
     st.subheader("Demo Controls")
-    col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
+    col_ctrl1, col_ctrl2, col_ctrl3, col_ctrl4 = st.columns(4)
     with col_ctrl1:
-        if st.button("Start Demo") and status == 'DRAFT':
-            config['status'] = 'RUNNING'
-            config['start_ts_ms'] = get_current_ms()
-            update_config({'params': config['params'], 'status': 'RUNNING', 'start_ts_ms': config['start_ts_ms']})
-            start_timer_service()
-            start_batch_runner()
-            st.success("Demo started.")
+        # Debug information for Start Demo button
+        st.caption(f"Debug: Status = '{status}', Can start = {status == 'DRAFT'}")
+        
+        start_button_clicked = st.button("Start Demo")
+        if start_button_clicked:
+            if status == 'DRAFT':
+                try:
+                    # Update config with current params and start demo
+                    start_ts = get_current_ms()
+                    st.info(f"Starting demo with timestamp: {start_ts}")
+                    
+                    # Add start_ts_ms and current_round to params (not as separate keys)
+                    params_with_timing = params.copy()
+                    params_with_timing['start_ts_ms'] = start_ts
+                    params_with_timing['current_round'] = 0
+                    
+                    update_config({
+                        'params': params_with_timing,  # Include timing info in params
+                        'status': 'RUNNING', 
+                        'start_ts_ms': start_ts  # This will be converted to start_ts for the database
+                    })
+                    
+                    # Broadcast status change to all users via realtime
+                    publish_demo_status_update('RUNNING', 'Demo has started! Trading is now active.')
+                    
+                    st.info("Config updated, starting services...")
+                    start_timer_service()
+                    start_batch_runner()
+                    st.success("Demo started! Refreshing page...")
+                    st.rerun()  # Force page refresh to show new status
+                    
+                except Exception as e:
+                    st.error(f"Error starting demo: {e}")
+                    st.exception(e)
+            else:
+                st.warning(f"Cannot start demo. Current status is '{status}', but needs to be 'DRAFT'")
     with col_ctrl2:
         if st.button("Freeze Trading") and status == 'RUNNING':
             config['status'] = 'FROZEN'
             update_config({'status': 'FROZEN'})
+            publish_demo_status_update('FROZEN', 'Trading has been frozen by admin.')
             st.success("Trading frozen.")
     with col_ctrl3:
         if st.button("Resume Trading") and status == 'FROZEN':
             config['status'] = 'RUNNING'
             update_config({'status': 'RUNNING'})
+            publish_demo_status_update('RUNNING', 'Trading has been resumed by admin.')
             st.success("Trading resumed.")
+    with col_ctrl4:
+        # Reset Demo button with confirmation
+        if st.button("🔄 Reset Demo", type="secondary"):
+            # Use session state for confirmation dialog
+            st.session_state.show_reset_confirmation = True
+        
+        # Show confirmation dialog if requested
+        if st.session_state.get('show_reset_confirmation', False):
+            st.warning("⚠️ This will completely reset the demo and clear all data!")
+            col_confirm1, col_confirm2 = st.columns(2)
+            with col_confirm1:
+                if st.button("✅ Confirm Reset", type="primary"):
+                    # Reset all demo state
+                    reset_success = reset_demo_state()
+                    st.session_state.show_reset_confirmation = False
+                    
+                    if reset_success:
+                        st.success("Demo reset completed! Please refresh the page manually to see the updated status.")
+                        st.info("💡 Tip: Press F5 or refresh your browser to see the DRAFT status")
+                    else:
+                        st.error("Reset encountered errors. Check the messages above for details.")
+                    
+                    # Don't auto-refresh so user can see all messages
+            with col_confirm2:
+                if st.button("❌ Cancel"):
+                    st.session_state.show_reset_confirmation = False
+                    st.rerun()
 
     # Manual Resolution (override)
     if params['mr_enabled']:
@@ -193,9 +559,16 @@ def run_admin_app():
     # Graph
     st.subheader("Performance Graph")
     if status == 'RESOLVED':
-        generate_graph(output_path="graph.png")
-        st.image("graph.png")
-        os.remove("graph.png")
+        try:
+            generate_graph(output_path="graph.png")
+            if os.path.exists("graph.png"):
+                st.image("graph.png")
+                os.remove("graph.png")
+            else:
+                st.warning("⚠️ No graph data available. This may be because no trading activity occurred during the demo.")
+        except Exception as e:
+            st.error(f"Error generating graph: {e}")
+            st.info("💡 Graph generation requires trading activity and metrics data.")
     else:
         st.info("Graph available after resolution.")
 
@@ -402,6 +775,13 @@ def run_admin_app():
     current_tick = get_current_tick().get('tick_id', 0)
     if current_tick > st.session_state.last_tick:
         st.session_state.last_tick = current_tick
+        st.rerun()
+    
+    # Auto-refresh when demo is running to show real-time countdown
+    # This is placed at the end so button interactions are processed first
+    if status in ['RUNNING', 'FROZEN']:
+        import time
+        time.sleep(1)  # Refresh every 1 second
         st.rerun()
 
 if __name__ == "__main__":

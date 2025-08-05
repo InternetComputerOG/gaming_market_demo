@@ -33,16 +33,56 @@ def update_config(config_data: Dict[str, Any]) -> None:
     # Try to update existing config, or insert if none exists
     existing = db.table('config').select('config_id').limit(1).execute()
     
-    # Handle special timestamp conversion and wrap params in JSONB
+    # Handle special timestamp conversion and store individual fields
     update_data = {}
-    if 'start_ts_ms' in config_data:
-        # Convert milliseconds to timestamp for database
-        from datetime import datetime
-        start_ts_ms = config_data['start_ts_ms']
-        update_data['start_ts'] = datetime.fromtimestamp(start_ts_ms / 1000).isoformat()
     
-    # Store the entire config_data as params JSONB
-    update_data['params'] = config_data
+    # Define fields that exist in the config table schema
+    # Only store fields that actually exist in the database
+    # Based on errors: start_ts_ms, current_round don't exist as columns
+    supported_config_fields = {'status', 'params', 'start_ts', 'engine_state'}
+    
+    # Store individual config fields at the top level (only supported ones)
+    for key, value in config_data.items():
+        if key == 'start_ts_ms':
+            # Convert milliseconds to timestamp for database (start_ts column exists)
+            # But store raw milliseconds in params since start_ts_ms column doesn't exist
+            from datetime import datetime
+            update_data['start_ts'] = datetime.fromtimestamp(value / 1000).isoformat()
+            # Don't store start_ts_ms at top level - it will be stored in params below
+        elif key == 'params':
+            # Store params as JSONB, but merge with existing params to preserve values
+            if 'params' not in update_data:
+                # Load existing params from database to merge
+                try:
+                    existing_config = load_config()
+                    existing_params = existing_config.get('params', {})
+                    # Merge existing params with new params
+                    merged_params = {**existing_params, **value}
+                    update_data['params'] = merged_params
+                except:
+                    # If loading fails, just use the new params
+                    update_data['params'] = value
+            else:
+                # Merge with params already in update_data
+                existing_params = update_data['params'] if isinstance(update_data['params'], dict) else {}
+                merged_params = {**existing_params, **value}
+                update_data['params'] = merged_params
+        elif key in supported_config_fields:
+            # Store other supported fields directly (status, etc.)
+            update_data[key] = value
+        else:
+            # Store unsupported fields in params instead
+            if 'params' not in update_data:
+                update_data['params'] = {}
+            if isinstance(update_data['params'], dict):
+                update_data['params'][key] = value
+            else:
+                # If params is not a dict, create a new dict with the existing params and new field
+                existing_params = update_data['params'] if update_data['params'] else {}
+                update_data['params'] = {**existing_params, key: value}
+    
+    # Debug: Print what we're storing
+    print(f"update_config storing: {update_data}")
     
     if existing.data:
         # Update existing config
@@ -133,9 +173,16 @@ def insert_order(order: Dict[str, Any]) -> str:
     result = db.table('orders').insert(order).execute()
     return result.data[0]['order_id'] if result.data else ''
 
-def fetch_open_orders(binary_id: int) -> List[Dict[str, Any]]:
+def fetch_open_orders(binary_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Fetch open orders. If binary_id is None, fetch all open orders globally."""
     db = get_db()
-    return db.table('orders').select('*').eq('outcome_i', binary_id).eq('status', 'OPEN').execute().data
+    query = db.table('orders').select('*').eq('status', 'OPEN')
+    
+    # If binary_id is specified, filter by outcome
+    if binary_id is not None:
+        query = query.eq('outcome_i', binary_id)
+    
+    return query.execute().data
 
 def fetch_user_orders(user_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
     """Fetch orders for a specific user, optionally filtered by status"""
@@ -179,8 +226,27 @@ def get_current_tick() -> Dict[str, Any]:
 
 # Events queries
 def insert_events(events: List[Dict[str, Any]]) -> None:
+    """Insert events into the database, filtering out unsupported fields."""
     db = get_db()
-    db.table('events').insert(events).execute()
+    
+    # Define the supported fields for the events table schema
+    # Only include fields that actually exist in the database schema
+    # Based on the error messages, 'payout_total', 'freed', and 'timestamp' don't exist
+    supported_fields = {'type', 'outcome_i', 'event_id'}
+    
+    # Filter events to only include supported fields
+    filtered_events = []
+    for event in events:
+        filtered_event = {k: v for k, v in event.items() if k in supported_fields}
+        filtered_events.append(filtered_event)
+    
+    if filtered_events:
+        try:
+            db.table('events').insert(filtered_events).execute()
+        except Exception as e:
+            # Log the error but don't crash the resolution process
+            print(f"Warning: Failed to insert events: {e}")
+            print(f"Events that failed: {filtered_events}")
 
 # Metrics queries
 def update_metrics(metrics: Dict[str, Any]) -> None:

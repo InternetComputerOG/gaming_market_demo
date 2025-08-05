@@ -37,7 +37,9 @@ def run_tick():
     if config['status'] not in ['RUNNING'] or config.get('frozen', False):
         return
 
-    start_ts_ms = config.get('start_ts', 0)  # Assume ms
+    # Get start_ts_ms from params (where it's actually stored)
+    params = config.get('params', {})
+    start_ts_ms = params.get('start_ts_ms', 0)
     current_ms = get_current_ms()
     current_time_sec = safe_divide(Decimal(current_ms - start_ts_ms), Decimal(1000))  # seconds for interpolation
 
