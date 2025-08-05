@@ -38,6 +38,7 @@ class Fill(TypedDict):
     fee: Decimal
     tick_id: int
     ts_ms: int
+    fill_type: str  # 'CROSS_MATCH', 'LOB_MATCH', 'AMM', 'AUTO_FILL'
 
 def apply_orders(
     state: EngineState,
@@ -155,6 +156,43 @@ def apply_orders(
         # Fees are applied transparently and separately from execution prices
         lob_fills, remaining = match_market_order(state, i, is_buy, is_yes, size, params_dyn, current_time, tick_id=0)
         fills.extend(lob_fills)
+        
+        # Update q_yes/q_no for LOB market matches (per TDD: market orders vs LOB should update the traded q)
+        if lob_fills:
+            binary = get_binary(state, i)
+            total_lob_fill_size = sum(Decimal(fill['size']) for fill in lob_fills)
+            if is_yes:
+                if is_buy:
+                    binary['q_yes'] = float(Decimal(binary['q_yes']) + total_lob_fill_size)
+                else:
+                    binary['q_yes'] = float(Decimal(binary['q_yes']) - total_lob_fill_size)
+            else:
+                if is_buy:
+                    binary['q_no'] = float(Decimal(binary['q_no']) + total_lob_fill_size)
+                else:
+                    binary['q_no'] = float(Decimal(binary['q_no']) - total_lob_fill_size)
+            
+            # Validate solvency after LOB q updates
+            try:
+                validate_solvency_invariant(binary)
+            except ValueError as e:
+                # Critical error - rollback the LOB q changes and reject order
+                if is_yes:
+                    if is_buy:
+                        binary['q_yes'] = float(Decimal(binary['q_yes']) - total_lob_fill_size)
+                    else:
+                        binary['q_yes'] = float(Decimal(binary['q_yes']) + total_lob_fill_size)
+                else:
+                    if is_buy:
+                        binary['q_no'] = float(Decimal(binary['q_no']) - total_lob_fill_size)
+                    else:
+                        binary['q_no'] = float(Decimal(binary['q_no']) + total_lob_fill_size)
+                # Remove the LOB fills that were just added
+                for _ in range(len(lob_fills)):
+                    fills.pop()
+                events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': f'LOB solvency invariant violated: {e}'}})
+                continue
+        
         if remaining <= Decimal('0'):
             events.append({'type': 'ORDER_FILLED', 'payload': {'order_id': order['order_id']}})
             continue
@@ -196,7 +234,8 @@ def apply_orders(
             'size': usdc_amount(remaining),
             'fee': usdc_amount(fee),
             'tick_id': 0,  # Placeholder
-            'ts_ms': current_time
+            'ts_ms': current_time,
+            'fill_type': 'AMM'
         }
         fills.append(fill)
         # Update token supplies to reflect the trade
@@ -252,11 +291,16 @@ def apply_orders(
             events.extend(auto_fill_events)
         events.append({'type': 'ORDER_FILLED', 'payload': {'order_id': order['order_id']}})
 
-    # Validate engine state at end of order processing
+    # Validate engine state and solvency for all binaries at end of order processing
     try:
         validate_engine_state(state, params_dyn)
+        # Explicit solvency validation for all binaries (per checklist item #2)
+        for i in range(len(state['binaries'])):
+            binary = get_binary(state, i)
+            if binary['active']:
+                validate_solvency_invariant(binary)
     except ValueError as e:
         # Critical error - the entire order batch should be considered failed
-        raise ValueError(f"Engine state validation failed at end of apply_orders: {e}")
+        raise ValueError(f"Engine state/solvency validation failed at end of apply_orders: {e}")
 
     return fills, state, events

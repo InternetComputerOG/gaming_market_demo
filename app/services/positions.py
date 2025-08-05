@@ -88,11 +88,41 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
         seller_new_balance = seller_balance + seller_proceeds
         update_user_balance(sell_user_id, float(seller_new_balance))
         
-        # Update engine state token quantities per TDD cross-matching mechanics
-        # TDD Line 175: "Update q_yes_i += Δ, q_no_i += Δ"
+        # Update engine state token quantities per TDD requirements
+        # Cross-matches update both q_yes and q_no (TDD Line 175: "Update q_yes_i += Δ, q_no_i += Δ")
+        # AMM/LOB/auto-fills update only one q (either q_yes OR q_no)
         binary = get_binary(state, outcome_i)
-        binary['q_yes'] = float(Decimal(str(binary['q_yes'])) + size)
-        binary['q_no'] = float(Decimal(str(binary['q_no'])) + size)
+        
+        # Determine fill type - check for cross-match indicators
+        fill_type = fill.get('fill_type', 'UNKNOWN')
+        
+        # If no explicit fill_type, infer from fill structure
+        if fill_type == 'UNKNOWN':
+            if 'price_yes' in fill and 'price_no' in fill:
+                fill_type = 'CROSS_MATCH'
+            elif buy_user_id == '00000000-0000-0000-0000-000000000000' or sell_user_id == '00000000-0000-0000-0000-000000000000':
+                fill_type = 'AMM'
+            else:
+                fill_type = 'LOB_MATCH'
+        
+        # Update q_yes/q_no based on fill type
+        if fill_type == 'CROSS_MATCH':
+            # Cross-matches: Update both q_yes and q_no
+            binary['q_yes'] = float(Decimal(str(binary['q_yes'])) + size)
+            binary['q_no'] = float(Decimal(str(binary['q_no'])) + size)
+        else:
+            # AMM/LOB/auto-fills: Update only the relevant q
+            if yes_no == 'YES':
+                binary['q_yes'] = float(Decimal(str(binary['q_yes'])) + size)
+            else:
+                binary['q_no'] = float(Decimal(str(binary['q_no'])) + size)
+        
+        # Validate solvency invariant after q updates (TDD requirement: q_yes + q_no < L_i)
+        try:
+            from app.utils import validate_solvency_invariant
+            validate_solvency_invariant(binary)
+        except ValueError as e:
+            raise ValueError(f"Solvency invariant violated after position update for fill {fill.get('trade_id', 'unknown')}: {e}")
         
         # Update trade counts for both users
         db = get_db()

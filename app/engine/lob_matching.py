@@ -287,6 +287,7 @@ def cross_match_binary(
                 'fee': fee,
                 'tick_id': tick_id,
                 'ts_ms': current_ts,
+                'fill_type': 'CROSS_MATCH'
             })
             
             # Only process one match per YES pool for simplicity
@@ -385,6 +386,7 @@ def match_market_order(
                 'fee': fee,
                 'tick_id': tick_id,
                 'ts_ms': current_ts,
+                'fill_type': 'LOB_MATCH'
             })
             
             # Store original volume for proportional share reduction

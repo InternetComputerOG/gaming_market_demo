@@ -14,7 +14,32 @@ Items are grouped by severity: **High** (solvency/functional breaks), **Medium**
 ## High Severity Items
 These could break solvency invariants (e.g., q_yes + q_no < L_i per binary), lead to incorrect payouts, or cause cascading errors in batch processing. Prioritize: Audit engine_orders.py, positions.py, and batch_runner.py integrations.
 
-1. [ ] **q_yes/q_no Update Mismatch Across Fills**: Positions.py always adds fill size to both q_yes and q_no, but TDD requires this only for cross-matches (both updated), while AMM/LOB/auto-fills update only one (YES or NO). This over-inflates q, potentially violating solvency (payouts > L_i) and causing invariant failures in validations.
+### 1. q_yes/q_no Update Mismatch Across Fills (HIGH SEVERITY)
+
+**Status**: ✅ COMPLETED
+
+**Issue**: Different fill types (AMM, LOB, cross-match) update q_yes and q_no inconsistently, violating TDD requirements.
+
+**Root Cause**: 
+- Cross-matches should update both q_yes and q_no (per TDD line 244)
+- AMM fills should update only one q (either q_yes OR q_no)
+- Current implementation may update both for all fill types
+
+**Fix Required**:
+- [x] Add fill_type classification to Fill objects
+- [x] Update positions.py to handle different fill types correctly:
+  - Cross-matches: Update both q_yes and q_no
+  - AMM/LOB fills: Update only the relevant q (yes_no side)
+- [x] Add validation to ensure solvency invariant (q_yes + q_no < L_i) after updates
+- [x] Add unit tests to verify correct q update behavior for each fill type
+
+**Implementation Summary**:
+- Added `fill_type` field to Fill TypedDict in `engine/orders.py`
+- Updated fill creation in `engine/orders.py`, `engine/lob_matching.py`, and `app/engine/autofill.py` to include appropriate fill_type
+- Fixed q update logic in `services/positions.py` to use fill_type and update q values correctly
+- Added solvency validation after q updates
+- Added comprehensive unit test `test_q_update_mismatch_fix` that verifies correct behavior for all fill types
+
   - **Relevant Context**: TDD Derivations: Cross-matching updates both q_yes/no += Δ; AMM buy YES updates only q_yes += Δ. positions.py_context.md: "Always adds size to both q_yes and q_no (Lines 115-118) regardless of yes_no or fill_type". engine_orders.py_context.md: "AMM updates only one q (Lines 237-251)". autofill.py_context.md: "Updates one q (Lines 373-377)". lob_matching.py_context.md: "Cross updates both (Lines 209-210); market no updates". batch_runner.py_context.md: "Assumes fills add to both via positions.py".
   - **Steps to Audit/Fix**:
     1. In positions.py, add logic to check fill_type (e.g., if 'CROSS_MATCH', add to both; else add to q_{yes_no}). Use ticks.py classification ('CROSS_MATCH' if price_yes/no present).
@@ -25,7 +50,19 @@ These could break solvency invariants (e.g., q_yes + q_no < L_i per binary), lea
     6. Rerun full batch trace: Submit AMM/LOB/cross orders; check DB positions/state q match TDD.
   - **Priority Rationale**: High – Direct solvency risk; could lead to over-payouts or validation raises halting batches.
 
-2. [ ] **Missing q Updates in LOB Market Matches**: lob_matching.py's match_market_order doesn't update q_yes/no (expects higher-level), but engine_orders.py may not handle it, leading to under-updates and solvency breaks (payouts uncovered).
+2. [x] **Missing q Updates in LOB Market Matches**: lob_matching.py's match_market_order doesn't update q_yes/no (expects higher-level), but engine_orders.py may not handle it, leading to under-updates and solvency breaks (payouts uncovered).
+
+**Status**: ✅ COMPLETED
+
+**Implementation Summary**:
+- Added missing q_yes/q_no updates for LOB market matches in `engine_orders.py` after `match_market_order` call
+- Added proper solvency validation with rollback on violation for LOB fills
+- Enhanced end-of-batch solvency validation for all active binaries in `apply_orders`
+- Created comprehensive unit test `test_lob_market_q_updates_fix` that verifies:
+  - LOB market matches correctly update only one q (q_yes OR q_no based on yes_no side)
+  - Solvency invariants are maintained after LOB market matches
+  - The fix prevents the original bug where LOB matches didn't update q values
+- Test passes successfully, confirming the fix works correctly
   - **Relevant Context**: TDD: Market orders vs LOB should update the traded q (e.g., buy YES: q_yes +=size). lob_matching.py_context.md: "No q updates in match_market_order (unlike cross)". engine_orders.py_context.md: "MARKET: match_lob then AMM; AMM updates one q, but LOB not explicit". positions.py_context.md: "Updates from fill, but assumes both q – mismatch if engine doesn't update state q for LOB".
   - **Steps to Audit/Fix**:
     1. In engine_orders.py, after match_market_order (Lines 151-300), add q updates based on is_yes/is_buy (e.g., if buy YES: binary['q_yes'] += size).
