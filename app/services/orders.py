@@ -120,10 +120,12 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
         'outcome_i': outcome_i,
         'yes_no': yes_no,
         'type': order_type,
+        'is_buy': is_buy,  # CRITICAL FIX: Store is_buy field for engine compatibility
         'size': float(size),
         'limit_price': float(limit_price) if limit_price is not None else None,
         'max_slippage': float(max_slippage) if max_slippage is not None else None,
         'af_opt_in': af_opt_in,
+        'status': 'OPEN',  # CRITICAL FIX: Set status to OPEN so fetch_open_orders() can find it
         'remaining': float(size),  # Initially set to full size; updated by batch runner
         'ts_ms': ts_ms
     }

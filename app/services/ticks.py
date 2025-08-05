@@ -5,6 +5,8 @@ from app.engine.state import EngineState, get_binary, get_p_yes, get_p_no
 from app.utils import price_value, usdc_amount
 from app.db import get_db, insert_tick, update_metrics
 
+# AMM User ID - special UUID for AMM trades (must match engine/orders.py)
+AMM_USER_ID = '00000000-0000-0000-0000-000000000000'
 
 class Fill(TypedDict):
     """Enhanced Fill structure supporting LOB and cross-matching fills.
@@ -240,7 +242,7 @@ def normalize_fills_for_summary(fills: List[Dict[str, Any]]) -> List[Fill]:
                 'price_yes': float(fill['price_yes']),
                 'price_no': float(fill['price_no']),
             }
-        elif fill.get('buy_user_id') == 'AMM' or fill.get('sell_user_id') == 'AMM':
+        elif fill.get('buy_user_id') == AMM_USER_ID or fill.get('sell_user_id') == AMM_USER_ID:
             # AMM fill
             fill_type = 'AMM'
             normalized_fill: Fill = {

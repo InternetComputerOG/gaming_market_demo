@@ -34,6 +34,32 @@ ADMIN_PASSWORD = env.get('ADMIN_PASSWORD')
 def get_client() -> Client:
     return get_supabase_client()
 
+def insert_system_users():
+    """
+    Insert system users required for LOB matching and AMM operations.
+    These users are needed as foreign key references for trades.
+    """
+    try:
+        client = get_client()
+        
+        # Define system users with their UUIDs
+        system_users = [
+            {'user_id': '00000000-0000-0000-0000-000000000000', 'display_name': 'AMM System', 'is_admin': False, 'balance': 0, 'net_pnl': 0, 'trade_count': 0},
+            {'user_id': '11111111-1111-1111-1111-111111111111', 'display_name': 'Limit YES Pool', 'is_admin': False, 'balance': 0, 'net_pnl': 0, 'trade_count': 0},
+            {'user_id': '22222222-2222-2222-2222-222222222222', 'display_name': 'Limit NO Pool', 'is_admin': False, 'balance': 0, 'net_pnl': 0, 'trade_count': 0},
+            {'user_id': '33333333-3333-3333-3333-333333333333', 'display_name': 'Limit Pool', 'is_admin': False, 'balance': 0, 'net_pnl': 0, 'trade_count': 0},
+            {'user_id': '44444444-4444-4444-4444-444444444444', 'display_name': 'Market User', 'is_admin': False, 'balance': 0, 'net_pnl': 0, 'trade_count': 0}
+        ]
+        
+        # Insert system users using upsert to avoid conflicts
+        result = client.table('users').upsert(system_users).execute()
+        st.success(f"✅ System users inserted successfully ({len(system_users)} users)")
+        return True
+        
+    except Exception as e:
+        st.error(f"❌ Failed to insert system users: {e}")
+        return False
+
 def reset_demo_state():
     """
     Completely reset the demo state by clearing all relevant database tables
@@ -456,6 +482,12 @@ def run_admin_app():
         if start_button_clicked:
             if status == 'DRAFT':
                 try:
+                    # First, insert system users required for trading operations
+                    st.info("Inserting system users...")
+                    if not insert_system_users():
+                        st.error("Failed to insert system users. Cannot start demo.")
+                        return
+                    
                     # Update config with current params and start demo
                     start_ts = get_current_ms()
                     st.info(f"Starting demo with timestamp: {start_ts}")
@@ -572,6 +604,76 @@ def run_admin_app():
     else:
         st.info("Graph available after resolution.")
 
+    # Batch Runner Monitoring Section
+    st.subheader("⚙️ Batch Runner Status")
+    
+    try:
+        from app.runner.batch_runner import get_batch_runner_stats, is_batch_runner_healthy, restart_batch_runner_if_needed
+        
+        batch_stats = get_batch_runner_stats()
+        is_healthy = is_batch_runner_healthy()
+        
+        # Health status indicator
+        col_health1, col_health2, col_health3 = st.columns(3)
+        
+        with col_health1:
+            if is_healthy:
+                st.success("🟢 **Batch Runner: HEALTHY**")
+            else:
+                st.error("🔴 **Batch Runner: UNHEALTHY**")
+                if st.button("🔄 Restart Batch Runner", type="primary"):
+                    try:
+                        restart_batch_runner_if_needed()
+                        st.success("Batch runner restarted successfully!")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to restart batch runner: {e}")
+        
+        with col_health2:
+            st.metric("Thread Active", "✅ Yes" if batch_stats['is_active'] else "❌ No")
+            st.metric("Thread Alive", "✅ Yes" if batch_stats['thread_alive'] else "❌ No")
+        
+        with col_health3:
+            if batch_stats['last_tick_time']:
+                import datetime
+                time_since_tick = (datetime.datetime.now() - batch_stats['last_tick_time']).total_seconds()
+                st.metric("Last Tick", f"{time_since_tick:.1f}s ago")
+            else:
+                st.metric("Last Tick", "Never")
+        
+        # Detailed statistics
+        with st.expander("📈 Batch Runner Statistics", expanded=False):
+            col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+            
+            with col_stat1:
+                st.metric("Total Ticks", batch_stats['total_ticks'])
+                st.metric("Thread Restarts", batch_stats['thread_restarts'])
+            
+            with col_stat2:
+                st.metric("Orders Processed", batch_stats['total_orders_processed'])
+                st.metric("Fills Generated", batch_stats['total_fills_generated'])
+            
+            with col_stat3:
+                st.metric("Error Count", batch_stats['error_count'])
+                if batch_stats['thread_id']:
+                    st.metric("Thread ID", batch_stats['thread_id'])
+            
+            with col_stat4:
+                if batch_stats['last_error']:
+                    st.error(f"**Last Error:** {batch_stats['last_error']}")
+                else:
+                    st.success("**No Recent Errors**")
+                
+                # Processing rate
+                if batch_stats['total_ticks'] > 0:
+                    avg_orders_per_tick = batch_stats['total_orders_processed'] / batch_stats['total_ticks']
+                    st.metric("Avg Orders/Tick", f"{avg_orders_per_tick:.2f}")
+    
+    except Exception as e:
+        st.error(f"Error loading batch runner status: {e}")
+        st.info("💡 Batch runner monitoring requires the enhanced batch runner implementation.")
+    
     # LOB Monitoring Section (Section 4.2 of LOB Update Checklist)
     st.subheader("📊 LOB Monitoring")
     

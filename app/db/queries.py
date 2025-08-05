@@ -174,7 +174,8 @@ def insert_order(order: Dict[str, Any]) -> str:
     return result.data[0]['order_id'] if result.data else ''
 
 def fetch_open_orders(binary_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Fetch open orders. If binary_id is None, fetch all open orders globally."""
+    """Fetch open orders. If binary_id is None, fetch all open orders globally.
+    Orders are sorted by ts_ms for deterministic processing as required by the engine."""
     db = get_db()
     query = db.table('orders').select('*').eq('status', 'OPEN')
     
@@ -182,7 +183,20 @@ def fetch_open_orders(binary_id: Optional[int] = None) -> List[Dict[str, Any]]:
     if binary_id is not None:
         query = query.eq('outcome_i', binary_id)
     
-    return query.execute().data
+    # Sort by timestamp for deterministic processing (required by engine)
+    query = query.order('ts_ms')
+    
+    orders = query.execute().data
+    
+    # Log for debugging
+    if orders:
+        print(f"fetch_open_orders: Found {len(orders)} open orders")
+        for order in orders[:3]:  # Log first 3 orders for debugging
+            print(f"  Order {order['order_id']}: {order['type']} {order['yes_no']} size={order['size']} user={order['user_id']}")
+    else:
+        print("fetch_open_orders: No open orders found")
+    
+    return orders
 
 def fetch_user_orders(user_id: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
     """Fetch orders for a specific user, optionally filtered by status"""

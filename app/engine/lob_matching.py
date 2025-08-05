@@ -1,11 +1,18 @@
 from decimal import Decimal
 from typing import List, Dict, Any
 from typing_extensions import TypedDict
+import uuid
 
 from .state import EngineState, BinaryState, get_binary, update_subsidies
 from .params import EngineParams
 from app.utils import usdc_amount, price_value, validate_price, validate_size, safe_divide, validate_lob_pool_volume_semantics
 from .amm_math import get_effective_p_yes, get_effective_p_no
+
+# Special user IDs for LOB matching operations (must be valid UUIDs for database compatibility)
+LIMIT_YES_POOL_USER_ID = "11111111-1111-1111-1111-111111111111"
+LIMIT_NO_POOL_USER_ID = "22222222-2222-2222-2222-222222222222"
+LIMIT_POOL_USER_ID = "33333333-3333-3333-3333-333333333333"
+MARKET_USER_ID = "44444444-4444-4444-4444-444444444444"
 
 
 def get_pool_key(tick: int, af_opt_in: bool) -> int:
@@ -269,9 +276,9 @@ def cross_match_binary(
             
             # Add fill record
             fills.append({
-                'trade_id': str(hash(current_ts)),
-                'buy_user_id': 'limit_yes_pool',
-                'sell_user_id': 'limit_no_pool',
+                'trade_id': str(uuid.uuid4()),
+                'buy_user_id': LIMIT_YES_POOL_USER_ID,
+                'sell_user_id': LIMIT_NO_POOL_USER_ID,
                 'outcome_i': i,
                 'yes_no': 'YES',
                 'price_yes': price_yes,
@@ -368,9 +375,9 @@ def match_market_order(
             # Limit order makers get exactly their limit price (price)
             # Market order takers pay limit price + transparent fee
             fills.append({
-                'trade_id': str(hash(current_ts + len(fills))),
-                'buy_user_id': 'market_user' if is_buy else 'limit_pool',
-                'sell_user_id': 'limit_pool' if is_buy else 'market_user',
+                'trade_id': str(uuid.uuid4()),
+                'buy_user_id': MARKET_USER_ID if is_buy else LIMIT_POOL_USER_ID,
+                'sell_user_id': LIMIT_POOL_USER_ID if is_buy else MARKET_USER_ID,
                 'outcome_i': i,
                 'yes_no': yes_no,
                 'price': price,

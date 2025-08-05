@@ -1,6 +1,7 @@
 from decimal import Decimal
 from typing import List, Dict, Any, Tuple
 from typing_extensions import TypedDict
+import uuid
 
 from .state import EngineState, BinaryState, get_binary, update_subsidies, get_p_yes, get_p_no
 from .params import EngineParams
@@ -9,6 +10,9 @@ from .impact_functions import compute_dynamic_params, compute_f_i, apply_own_imp
 from .lob_matching import add_to_lob_pool, cross_match_binary, match_market_order
 from .autofill import trigger_auto_fills
 from app.utils import usdc_amount, price_value, validate_price, validate_size, safe_divide, validate_engine_state, validate_binary_state, validate_solvency_invariant
+
+# AMM User ID - special UUID for AMM trades to satisfy database foreign key constraints
+AMM_USER_ID = '00000000-0000-0000-0000-000000000000'
 
 class Order(TypedDict):
     order_id: str
@@ -183,9 +187,9 @@ def apply_orders(
         fee = Decimal(params_dyn['f']) * remaining * effective_p
         # Create AMM fill
         fill: Fill = {
-            'trade_id': str(len(fills)),  # Deterministic ID for demo
-            'buy_user_id': order['user_id'] if is_buy else 'AMM',
-            'sell_user_id': 'AMM' if is_buy else order['user_id'],
+            'trade_id': str(uuid.uuid4()),  # Generate proper UUID for database compatibility
+            'buy_user_id': order['user_id'] if is_buy else AMM_USER_ID,
+            'sell_user_id': AMM_USER_ID if is_buy else order['user_id'],
             'outcome_i': i,
             'yes_no': order['yes_no'],
             'price': price_value(effective_p),
