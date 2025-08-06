@@ -6,10 +6,11 @@ from app.config import get_supabase_client
 from app.db.queries import load_config
 from app.utils import from_ms, safe_divide
 
-def generate_graph(output_path: str = None) -> None:
+def generate_graph(output_path: str = None):
     """
     Generates a Matplotlib graph of cumulative volume, MM risk, and MM profit over time.
     Fetches data from 'ticks' and 'metrics' tables, computes relative time in seconds.
+    Returns the matplotlib figure object.
     """
     client: Client = get_supabase_client()
     
@@ -26,7 +27,13 @@ def generate_graph(output_path: str = None) -> None:
     
     if not ticks_data or not metrics_data:
         print("No data available for graphing.")
-        return
+        # Return empty figure for Streamlit
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, 'No data available for graphing', 
+                horizontalalignment='center', verticalalignment='center', 
+                transform=ax.transAxes, fontsize=14)
+        ax.set_title('Gaming Market Metrics Over Time')
+        return fig
     
     # Assume tick_ids match between tables; filter to common tick_ids for safety
     tick_ids = [t['tick_id'] for t in ticks_data]
@@ -58,8 +65,8 @@ def generate_graph(output_path: str = None) -> None:
     
     if output_path:
         plt.savefig(output_path)
-    else:
-        plt.show()
+    
+    return fig
 
 if __name__ == '__main__':
     generate_graph()

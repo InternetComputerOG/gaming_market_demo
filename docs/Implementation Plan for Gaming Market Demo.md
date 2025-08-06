@@ -33,7 +33,6 @@
    |     [ Engine Package ]  <-- Deterministic math (pure functions + unit tests)
    |
    |------> [ Supabase Postgres ]  <-- Durable state (users, orders, trades, ticks, events, configs)
-   |------> [ Supabase Realtime ]  <-- Live updates to clients
    |
    |------> [ Batch Runner ]  <-- Configurable interval: read new orders, run engine, write fills, publish updates
    |
@@ -41,7 +40,7 @@
 ```
 
 * **Front end:** Streamlit. Separate Admin dashboard URL (with password prompt); shareable participant URL. Simple join flow, Polymarket-like trading UI, scoreboard, admin controls.
-* **State:** Supabase Postgres for persistence; Supabase Realtime for pushing events/UI refresh.
+* **State:** Supabase Postgres for persistence.
 * **Engine:** Pure-Python package with a single entry point. Black-box the novel math (quadratics, asymmetries, diversions, auto-fills, etc.) behind a stable interface. 100% unit-tested.
 * **Concurrency model:** **Batch per tick**. New orders buffered in DB, processed atomically once per tick.
 * **Timer:** Background task (e.g., threading in Streamlit) for monitoring real-time countdowns, triggering automatic intermediate/final resolutions, and enforcing trading freezes.
@@ -120,19 +119,11 @@
 * **Timer monitors:** At timings, pause trading, eliminate pre-config (pay NO, free liquidity, redistribute, renormalize virtual_yes), resume after freeze.
 * **Final:** At end, pay based on winner (YES_w=1, NO_w=0; others opposite), distribute unfilled limits pro-rata, lock market.
 * **Payout Clarification:** All payouts (intermediate and final) are calculated based solely on user-held tokens, aggregated from the `positions` table (sum of `tokens` per user per `outcome_i` and `yes_no`). This excludes the initial virtual q0 component of q_yes_i/q_no_i, which is not held by users and does not contribute to actual liabilities or payouts. The engine's `trigger_resolution` function must sum user positions to determine redeemable amounts, ensuring solvency proofs hold as per the design (actual q_yes_i/q_no_i used only for pricing, not payouts).
-* **Final balances:** Starting + proceeds - costs + payouts + rebates - fees + unfilled returns.
 * All open orders canceled on final.
 
 ### Realtime Updates
 
 * After tick/resolution: Publish `TickEvent` (summary stats, prices, volumes), deltas (fills, positions, top of book per outcome/yes_no, leaderboard).
-
-### Observability & Export
-
-* **Events table** for audit.
-* **CSV export:** Trades, config, metrics (rankings, % gain/loss, trades/user, MM profit/risk).
-* **Graph:** Matplotlib plot (volume, MM risk (sum subsidy_i), MM profit (fees + seigniorage + remainings) over time). Use numpy for efficient data processing if needed.
-* **Gas Metrics:** Track and export per-user gas costs (sum of deductions), total gas costs across all users, and include in final rankings/CSV (e.g., net_pnl adjusted for gas, % gain/loss incorporating gas).
 
 ---
 
@@ -302,8 +293,6 @@ Use snake_case. Add created_at/updated_at. Single instance (no room_id).
 * `mm_risk` (numeric(18,6))
 * `mm_profit` (numeric(18,6))
 
-**Realtime channels:** `realtime:demo` for all.
-
 ---
 
 ## 6) Batch Runner (authoritative loop)
@@ -361,9 +350,7 @@ def run_tick():
 
 **Realtime UX**
 
-* Subscribe to `realtime:demo`.
-* On tick: Refresh trades, positions, books, leaderboard. For smoother realtime updates across users, integrate streamlit-webrtc or similar extensions if standard reruns/polling cause latency/flicker; subscribe to Supabase Realtime channels and use WebSocket handling for low-latency pushes.
-* On resolution: Show updates, final screen with rankings (% gain/loss = (final-start)/start, trades count), graph.
+* On tick: Refresh trades, positions, books, leaderboard. For smoother realtime updates across users, integrate streamlit-webrtc or similar extensions if standard reruns/polling cause latency/flicker.
 
 **Validation & UX details**
 
@@ -442,15 +429,14 @@ def run_tick():
   ├── __init__.py  # Makes /app a package for relative imports. Usage: Empty or exports; minimal. Needed Context: None. Relationships: Imported by all submodules.
   ├── config.py  # Handles loading configuration, environment variables, and session params. Usage: Loads .env, DB connections; short utility. Needed Context: None (first file). Relationships: Used by db/queries.py, services/*, runner/*.
   ├── utils.py  # General utility functions (e.g., timestamp conversions, fixed-point arithmetic helpers, validation logic). Usage: Common helpers like fixed-point math for USDC (18 decimals). Needed Context: config.py_context.md. Relationships: Imported by engine/*, services/* for math/validation.
-  ├── streamlit_app.py  # Main Streamlit script for participant UI (join, lobby, trading panels, realtime updates). Usage: Core participant UI logic; focus on layout/callbacks. Split if needed, but keep <800 lines. Needed Context: services/orders.py_context.md, services/positions.py_context.md, services/realtime.py_context.md, db/queries.py_context.md. Relationships: Calls services for data, uses utils for validation.
+  ├── streamlit_app.py  # Main Streamlit script for participant UI (join, lobby, trading panels, realtime updates). Usage: Core participant UI logic; focus on layout/callbacks. Split if needed, but keep <800 lines. Needed Context: services/orders.py_context.md, services/positions.py_context.md, db/queries.py_context.md. Relationships: Calls services for data, uses utils for validation.
   ├── streamlit_admin.py  # Separate Streamlit script for admin dashboard (config form, monitoring, start/pause, exports). Usage: Admin UI; similar to app.py but admin-specific. Needed Context: Same as streamlit_app.py plus scripts/export_csv.py_context.md. Relationships: Similar to streamlit_app.py, plus export triggers.
   ├── /services
   │   ├── __init__.py  # Exports service functions. Usage: Minimal. Needed Context: None. Relationships: For relative imports.
   │   ├── orders.py  # Service for handling order submission, validation, cancellation, and related DB operations. Usage: Order lifecycle; calls engine for simulation if needed. Needed Context: db/queries.py_context.md, engine/orders.py_context.md, utils.py_context.md. Relationships: Interacts with db, engine/orders.
   │   ├── positions.py  # Service for managing user positions, balance updates, and payouts. Usage: Position tracking; gas deductions here. Needed Context: db/queries.py_context.md, engine/state.py_context.md, utils.py_context.md. Relationships: Updates db, uses engine state for calcs.
   │   ├── ticks.py  # Service for tick processing, summary stats, and metrics updates. Usage: Tick summaries; calls engine if needed. Needed Context: db/queries.py_context.md, engine/state.py_context.md, runner/batch_runner.py_context.md. Relationships: Called by batch_runner.
-  │   ├── resolutions.py  # Service for triggering resolutions (intermediate/final), renormalization, and event handling. Usage: Resolution orchestration. Needed Context: db/queries.py_context.md, engine/resolutions.py_context.md, utils.py_context.md. Relationships: Calls engine/resolutions, updates db.
-  │   └── realtime.py  # Service for Supabase Realtime integration (subscriptions, publishing events, WebSocket handling). Usage: Event pushing; short integration code. Needed Context: db/queries.py_context.md, config.py_context.md. Relationships: Used by UIs and runners for live updates.
+  │   └── resolutions.py  # Service for triggering resolutions (intermediate/final), renormalization, and event handling. Usage: Resolution orchestration. Needed Context: db/queries.py_context.md, engine/resolutions.py_context.md, utils.py_context.md. Relationships: Calls engine/resolutions, updates db.
   ├── /db
   │   ├── __init__.py  # Exports db functions. Usage: Minimal. Needed Context: None. Relationships: For imports.
   │   ├── schema.sql  # SQL script for creating all database tables, enums, indexes, and constraints. Usage: DDL statements; generate from data model. Needed Context: config.py_context.md (for env vars). Relationships: Executed via migrations.

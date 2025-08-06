@@ -345,14 +345,18 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
             
             would_reject = max_slippage is not None and slippage > Decimal(str(max_slippage))
             
+            # Calculate fee as per TDD: fee = f * remaining * p_prime
+            fee_fallback = Decimal(params.get('f', 0.01)) * size * effective_price
+            total_cost_with_fee = (est_cost if is_buy else est_received) + fee_fallback
+            
             return {
                 'estimated_slippage': slippage,
                 'would_reject': would_reject,
-                'est_cost': est_cost if is_buy else est_received,
+                'est_cost': total_cost_with_fee,
                 'breakdown': {
                     'lob_fill': Decimal('0'),
                     'amm_fill': size,
-                    'total_fee': Decimal('0'),
+                    'total_fee': fee_fallback,
                     'effective_price': effective_price
                 },
                 'fallback': True

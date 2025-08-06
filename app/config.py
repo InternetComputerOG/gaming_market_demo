@@ -92,6 +92,6 @@ def get_default_engine_params() -> EngineParams:
         freeze_durs=[],
         elim_outcomes=[],
         starting_balance=1000.0,
-        gas_fee=0.01,
+        gas_fee=0.00,
         batch_interval_ms=5000,
     )

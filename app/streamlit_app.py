@@ -11,10 +11,23 @@ from app.utils import get_current_ms, usdc_amount, price_value, validate_size, v
 from app.db.queries import load_config, insert_user, fetch_user_balance, fetch_positions, fetch_user_orders, get_current_tick, fetch_pools, fetch_engine_state
 from app.services.orders import submit_order, cancel_order, get_user_orders, estimate_slippage
 from app.services.positions import fetch_user_positions
-from app.services.realtime import get_realtime_client, publish_event
+# Realtime functionality now handled via fragments
 from app.engine.state import get_binary, get_p_yes, get_p_no
 
 client = get_supabase_client()
+
+# System users to filter out from leaderboards and rankings
+SYSTEM_USERS = {
+    'AMM System',
+    'Limit YES Pool', 
+    'Limit NO Pool',
+    'Limit Pool',
+    'Market User'
+}
+
+def filter_system_users(users):
+    """Filter out system users from user list"""
+    return [user for user in users if user.get('display_name', '') not in SYSTEM_USERS]
 
 if 'user_id' not in st.session_state:
     display_name = st.text_input("Enter display name", key="display-name-input")
@@ -36,21 +49,7 @@ config = load_config()
 status = config['status']
 params: Dict[str, Any] = config['params']
 
-# Initialize realtime data containers in session state
-if 'realtime_prices' not in st.session_state:
-    st.session_state['realtime_prices'] = {}
-if 'realtime_trades' not in st.session_state:
-    st.session_state['realtime_trades'] = []
-if 'realtime_user_balance' not in st.session_state:
-    st.session_state['realtime_user_balance'] = None
-if 'realtime_user_positions' not in st.session_state:
-    st.session_state['realtime_user_positions'] = []
-if 'realtime_user_orders' not in st.session_state:
-    st.session_state['realtime_user_orders'] = []
-if 'realtime_status' not in st.session_state:
-    st.session_state['realtime_status'] = status
-if 'realtime_user_count' not in st.session_state:
-    st.session_state['realtime_user_count'] = 0
+# Fragment-based realtime updates - no need for manual realtime containers
 
 # Fragment-based realtime updates using Streamlit's native approach
 # Initialize fragment update timers
@@ -58,6 +57,9 @@ if 'last_price_update' not in st.session_state:
     st.session_state.last_price_update = 0
 if 'last_leaderboard_update' not in st.session_state:
     st.session_state.last_leaderboard_update = 0
+if 'realtime_user_count' not in st.session_state:
+    st.session_state.realtime_user_count = 0
+
 
 # Get batch interval from config for fragment update timing
 batch_interval_ms = params.get('batch_interval_ms', 5000)
@@ -88,22 +90,44 @@ def price_fragment(outcome_i):
 # Fragment for portfolio data - updates at batch interval
 @st.fragment(run_every=batch_interval_s)
 def portfolio_fragment(user_id):
+    # Check if we have cached data and it's recent
+    cache_key = f'portfolio_cache_{user_id}'
+    current_time = time.time()
+    
+    # Always refresh if cache is older than batch interval to catch fills/ticks
+    if (cache_key in st.session_state and 
+        'timestamp' in st.session_state[cache_key] and 
+        current_time - st.session_state[cache_key]['timestamp'] < batch_interval_s):
+        return st.session_state[cache_key]['data']
+    
     try:
         positions = fetch_user_positions(user_id)
         orders = get_user_orders(user_id, 'OPEN')
-        return {
+        
+        result = {
             'success': True,
             'positions': positions,
             'orders': orders,
             'error': None
         }
+        
+        # Cache the result
+        st.session_state[cache_key] = {
+            'data': result,
+            'timestamp': current_time
+        }
+        
+        return result
     except Exception as e:
-        return {
+        error_result = {
             'success': False,
             'positions': [],
             'orders': [],
             'error': str(e)
         }
+        
+        # Don't cache errors, but return them
+        return error_result
 
 # Helper function for getting current prices (used by price fragment)
 def get_current_prices(outcome_i):
@@ -114,19 +138,48 @@ def get_current_prices(outcome_i):
     current_p_no = get_p_no(binary)
     return current_p_yes, current_p_no
 
-# Enhanced waiting room with realtime status updates
+# Fragment for waiting room status checking - only runs when status is DRAFT
+@st.fragment(run_every=3)  # Check every 3 seconds
+def waiting_room_status_fragment():
+    """Fragment to check demo status and transition from waiting room"""
+    try:
+        fresh_config = load_config()
+        current_status = fresh_config['status']
+        
+        # Update session state for UI display
+        if 'status_check_count' not in st.session_state:
+            st.session_state.status_check_count = 0
+        st.session_state.status_check_count += 1
+        st.session_state.last_status_check = time.time()
+        
+        # If status changed from DRAFT, trigger transition
+        if current_status != 'DRAFT':
+            st.success("🚀 Demo is starting! Redirecting to trading interface...")
+            time.sleep(1)  # Brief pause for user to see the message
+            st.rerun()
+        
+        return {
+            'success': True,
+            'status': current_status,
+            'check_count': st.session_state.status_check_count,
+            'last_check': st.session_state.last_status_check
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e),
+            'status': 'DRAFT',
+            'check_count': st.session_state.get('status_check_count', 0),
+            'last_check': st.session_state.get('last_status_check', time.time())
+        }
+
+# Enhanced waiting room with fragment-based status updates
 if status == 'DRAFT':
     st.title("🎮 Gaming Market Demo")
     st.header("⏳ Waiting Room")
     
-    # Initialize waiting room variables
-    if 'refresh_counter' not in st.session_state:
-        st.session_state.refresh_counter = 0
-    if 'last_status_check' not in st.session_state:
-        st.session_state.last_status_check = time.time()
-    
-    # Calculate time since last check
-    time_since_last_check = time.time() - st.session_state.last_status_check
+    # Get status check data from fragment
+    status_data = waiting_room_status_fragment()
     
     # Show joined users count with realtime updates
     try:
@@ -148,17 +201,13 @@ if status == 'DRAFT':
         user_count = 0
         users = []
     
-    # Check for realtime status updates (replace polling with realtime check)
-    if st.session_state['realtime_status'] != 'DRAFT':
-        st.success("🚀 Demo is starting! Redirecting to trading interface...")
-        time.sleep(1)  # Brief pause for user to see the message
-        st.rerun()
-    
     # Manual refresh button
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
         if st.button("🔄 Check Status", type="primary"):
-            st.session_state.refresh_counter = 0  # Reset counter on manual refresh
+            # Reset status check count and force immediate rerun
+            if 'status_check_count' in st.session_state:
+                st.session_state.status_check_count = 0
             st.rerun()
     
     # Show current players
@@ -176,12 +225,19 @@ if status == 'DRAFT':
         st.markdown("---")
         col_status1, col_status2 = st.columns(2)
         with col_status1:
-            st.caption(f"🔄 Auto-checking every 3 seconds... (Check #{st.session_state.refresh_counter})")
-        with col_status2:
-            if time_since_last_check < 1:
-                st.caption("🟢 Just checked - Status: DRAFT")
+            if status_data['success']:
+                st.caption(f"🔄 Auto-checking every 3 seconds... (Check #{status_data['check_count']})")
             else:
-                st.caption(f"⏱️ Next check in {max(0, 3 - int(time_since_last_check))} seconds")
+                st.caption("⚠️ Auto-check error - Use manual check button")
+        with col_status2:
+            if status_data['success']:
+                time_since_last_check = time.time() - status_data['last_check']
+                if time_since_last_check < 1:
+                    st.caption("🟢 Just checked - Status: DRAFT")
+                else:
+                    st.caption(f"⏱️ Next check in {max(0, 3 - int(time_since_last_check))} seconds")
+            else:
+                st.caption(f"❌ Error: {status_data.get('error', 'Unknown error')}")
     
     st.stop()
 
@@ -209,8 +265,13 @@ if status == 'FROZEN':
 if status == 'RESOLVED':
     st.write("Market resolved")
     users = client.table('users').select('*').execute().data
+    
+    # Filter out system users
+    users = filter_system_users(users)
+    
     rankings = sorted(users, key=lambda u: float(u['net_pnl']), reverse=True)
-    st.table([{ 'Name': r['display_name'], 'Net PNL': float(r['net_pnl']), '% Gain': float(r['net_pnl']) / float(config['starting_balance']) * 100 if config['starting_balance'] else 0, 'Trades': r['trade_count'] } for r in rankings])
+    starting_balance = params.get('starting_balance', 0)
+    st.table([{ 'Name': r['display_name'], 'Net PNL': float(r['net_pnl']), '% Gain': float(r['net_pnl']) / float(starting_balance) * 100 if starting_balance else 0, 'Trades': r['trade_count'] } for r in rankings])
     from app.scripts.generate_graph import generate_graph
     fig = generate_graph()
     st.pyplot(fig)
@@ -292,10 +353,29 @@ else:
 # Fragment for user balance - updates at batch interval
 @st.fragment(run_every=batch_interval_s)
 def balance_fragment():
+    # Check if we have cached data and it's recent
+    cache_key = f'balance_cache_{user_id}'
+    current_time = time.time()
+    
+    if (cache_key in st.session_state and 
+        'timestamp' in st.session_state[cache_key] and 
+        current_time - st.session_state[cache_key]['timestamp'] < batch_interval_s):
+        cached_balance = st.session_state[cache_key]['data']
+        st.metric("Balance", f"${cached_balance:.2f}")
+        return cached_balance
+    
     try:
         balance = fetch_user_balance(user_id)
-        st.metric("Balance", f"${float(balance):.2f}")
-        return float(balance)
+        balance_float = float(balance)
+        
+        # Cache the result
+        st.session_state[cache_key] = {
+            'data': balance_float,
+            'timestamp': current_time
+        }
+        
+        st.metric("Balance", f"${balance_float:.2f}")
+        return balance_float
     except Exception as e:
         st.warning(f"Could not load balance: {str(e)}")
         return 0
@@ -307,7 +387,39 @@ balance = balance_fragment()
 def leaderboard_fragment():
     try:
         users = client.table('users').select('*').execute().data
-        leaderboard = sorted(users, key=lambda u: float(u['balance']) + float(u['net_pnl']), reverse=True)[:5]
+        
+        # Filter out system users
+        users = filter_system_users(users)
+        
+        # Calculate total portfolio value including current market value of tokens
+        users_with_portfolio_value = []
+        for user in users:
+            total_value = float(user['balance']) + float(user['net_pnl'])
+            
+            # Add current market value of held tokens
+            try:
+                positions = client.table('positions').select('*').eq('user_id', user['user_id']).execute().data
+                for p in positions:
+                    if float(p['tokens']) > 0:
+                        outcome_i = int(p['outcome_i'])
+                        current_p_yes, current_p_no = get_current_prices(outcome_i)
+                        if current_p_yes is not None and current_p_no is not None:
+                            if p['yes_no'] == 'YES':
+                                total_value += float(p['tokens']) * current_p_yes
+                            else:
+                                total_value += float(p['tokens']) * current_p_no
+                        else:
+                            # Fallback to $0.50 if prices unavailable
+                            total_value += float(p['tokens']) * 0.5
+            except Exception:
+                # If we can't get positions, just use balance + net_pnl
+                pass
+            
+            user_copy = user.copy()
+            user_copy['total_portfolio_value'] = total_value
+            users_with_portfolio_value.append(user_copy)
+        
+        leaderboard = sorted(users_with_portfolio_value, key=lambda u: u['total_portfolio_value'], reverse=True)[:5]
         
         # Return data instead of writing to sidebar directly
         return {
@@ -332,7 +444,7 @@ with st.sidebar:
     
     if leaderboard_data['success']:
         for rank, user in enumerate(leaderboard_data['leaderboard'], 1):
-            total_value = float(user['balance']) + float(user['net_pnl'])
+            total_value = user.get('total_portfolio_value', float(user['balance']) + float(user['net_pnl']))
             st.write(f"{rank}. {user['display_name']}: ${total_value:.2f}")
         
         # Display user count
@@ -342,10 +454,40 @@ with st.sidebar:
         st.warning(f"Could not load leaderboard: {leaderboard_data['error']}")
         user_count = 0
 
-# Use actual outcome names from config instead of generic "Outcome 1", "Outcome 2"
-outcome_tabs = st.tabs([params['outcome_names'][i] if i < len(params['outcome_names']) else f"Outcome {i+1}" for i in range(params['n_outcomes'])])
+# Use actual outcome names from config, filtering for active outcomes only (multi-resolution support)
+try:
+    # Get engine state to check for active outcomes in multi-resolution scenarios
+    engine_state = fetch_engine_state()
+    active_outcomes = []
+    
+    for i in range(params['n_outcomes']):
+        # Check if outcome is still active (not eliminated in multi-resolution)
+        if i < len(engine_state.get('binaries', [])):
+            binary = engine_state['binaries'][i]
+            is_active = binary.get('active', True)  # Default to active if not specified
+            if is_active:
+                active_outcomes.append(i)
+        else:
+            # Fallback: assume active if state unavailable
+            active_outcomes.append(i)
+    
+    # If no active outcomes found, show all (fallback for single-resolution or state issues)
+    if not active_outcomes:
+        active_outcomes = list(range(params['n_outcomes']))
+        
+except Exception:
+    # Fallback: show all outcomes if state fetch fails
+    active_outcomes = list(range(params['n_outcomes']))
 
-for outcome_i, tab in enumerate(outcome_tabs):
+# Create tabs only for active outcomes
+outcome_tabs = st.tabs([
+    params['outcome_names'][i] if i < len(params['outcome_names']) else f"Outcome {i+1}" 
+    for i in active_outcomes
+])
+
+for tab_index, tab in enumerate(outcome_tabs):
+    # Use actual outcome index from active_outcomes, not tab index
+    outcome_i = active_outcomes[tab_index]
     with tab:
         col1, col2 = st.columns(2)
         with col1:
@@ -398,15 +540,16 @@ for outcome_i, tab in enumerate(outcome_tabs):
                     
                     # Calculate trading fee estimate and effective price
                     if order_type == 'LIMIT' and limit_price_input is not None:
-                        # For limit orders: transparent fee structure with true limit price enforcement
-                        trading_fee_est = params['f_match'] * float(size) * limit_price_input / 2
-                        effective_price = limit_price_input  # True limit price enforcement
+                        # For limit orders: use proper fee structure based on match type
                         execution_cost = float(size) * limit_price_input
+                        # Use f_match for cross-matches, f for same-side matches (simplified to f_match for estimation)
+                        trading_fee_est = params.get('f_match', 0.02) * float(size) * limit_price_input
+                        effective_price = limit_price_input  # True limit price enforcement
                     else:
-                        # For market orders: use slippage estimation
-                        trading_fee_est = float(est_cost) * params.get('f', 0.01)  # Fallback fee estimate
+                        # For market orders: est_cost already includes fees from service
+                        execution_cost = float(est_cost)  # This already includes trading fees
+                        trading_fee_est = 0  # Don't double-count fees
                         effective_price = float(est_cost) / float(size) if float(size) > 0 else 0
-                        execution_cost = float(est_cost)
                     
                     fee_col1, fee_col2 = st.columns(2)
                     with fee_col1:
@@ -436,19 +579,23 @@ for outcome_i, tab in enumerate(outcome_tabs):
                     st.subheader("🎯 Potential Returns")
                     if is_buy:
                         # Calculate potential return if user wins
-                        total_investment = total_cost if order_type == 'LIMIT' else execution_cost + float(gas_fee)
+                        total_investment = total_cost
                         tokens_acquired = float(size)
                         payout_if_win = tokens_acquired * 1.0  # Each token pays $1 if outcome occurs
                         net_profit = payout_if_win - total_investment
                         return_multiple = payout_if_win / total_investment if total_investment > 0 else 0
                         
                         # Create prominent return display
-                        st.success(f"""**🎲 POTENTIAL OUTCOME:**
-**Investment:** ${total_investment:.2f}
-**If {yes_no} wins:** ${payout_if_win:.2f} payout
-**Net Profit:** ${net_profit:.2f}
-**Return Multiple:** {return_multiple:.2f}x""")
-                        
+                        st.markdown(f"""
+<div style="border: 1px solid #D6E9C6; padding: 10px; margin-bottom: 10px; border-radius: 3px;">
+    <strong>🎲 TRADE BREAKDOWN:</strong><br>
+    <strong>Investment:</strong> ${total_investment:.2f}<br>
+    <strong>If {yes_no} wins:</strong> ${payout_if_win:.2f} payout<br>
+    <strong>Net Profit:</strong> ${net_profit:.2f}<br>
+    <strong>Return Multiple:</strong> {return_multiple:.2f}x
+</div>
+""", unsafe_allow_html=True)
+
                         # Risk warning
                         if effective_cost_per_token > 0.8:
                             st.warning("⚠️ **High Risk Trade:** You're paying more than $0.80 per token. Consider the probability carefully.")
@@ -490,9 +637,27 @@ for outcome_i, tab in enumerate(outcome_tabs):
                         'ts_ms': get_current_ms()
                     }
                     order_id = submit_order(user_id, order_data)
-                    st.success(f"Order {order_id} submitted")
+                    st.success(f"✅ Order {order_id} submitted successfully!")
+                    
+                    # Clear any cached fragment data to force immediate refresh
+                    # Clear portfolio cache with correct user-specific key
+                    portfolio_cache_key = f'portfolio_cache_{user_id}'
+                    if portfolio_cache_key in st.session_state:
+                        del st.session_state[portfolio_cache_key]
+                    
+                    # Clear balance cache with correct user-specific key
+                    balance_cache_key = f'balance_cache_{user_id}'
+                    if balance_cache_key in st.session_state:
+                        del st.session_state[balance_cache_key]
+                    
+                    # Clear trades cache (this one is global)
+                    if 'trades_cache' in st.session_state:
+                        del st.session_state['trades_cache']
+                    
+                    # Force immediate page refresh to show updated portfolio and trades
+                    st.rerun()
                 except ValueError as e:
-                    st.error(str(e))
+                    st.error(f"❌ Order submission failed: {str(e)}")
 
         with col2:
             st.header("📊 Order Book")
@@ -797,9 +962,19 @@ with pos_tab2:
                                 try:
                                     cancel_order(order['order_id'], user_id)
                                     st.success(f"✅ Order #{order['order_id']} canceled successfully!")
+                                    
                                     # Clear the pending state
                                     if f'cancel_pending_{order["order_id"]}' in st.session_state:
                                         del st.session_state[f'cancel_pending_{order["order_id"]}']
+                                    
+                                    # Clear cached fragment data to force immediate refresh
+                                    if 'portfolio_cache' in st.session_state:
+                                        del st.session_state['portfolio_cache']
+                                    if f'portfolio_cache_{user_id}' in st.session_state:
+                                        del st.session_state[f'portfolio_cache_{user_id}']
+                                    if f'balance_cache_{user_id}' in st.session_state:
+                                        del st.session_state[f'balance_cache_{user_id}']
+                                    
                                     st.rerun()
                                 except ValueError as e:
                                     st.error(f"❌ Error canceling order: {str(e)}")
@@ -893,13 +1068,30 @@ with pos_tab3:
             if order['type'] == 'LIMIT' and order['limit_price'] is not None and order['is_buy']
         )
         
-        # Capital already invested in filled positions (cost basis)
-        # This is an approximation - ideally we'd track actual purchase prices
-        filled_capital = sum(
-            float(p['tokens']) * 0.5  # Assume average cost of $0.50 per token as approximation
-            for p in positions 
-            if float(p['tokens']) > 0
-        )
+        # Capital already invested in filled positions (estimated using current market value)
+        # Note: This uses current market prices as approximation since we don't track cost basis
+        filled_capital = 0
+        try:
+            for p in positions:
+                if float(p['tokens']) > 0:
+                    outcome_i = int(p['outcome_i'])
+                    # Get current market price for this outcome/token type
+                    current_p_yes, current_p_no = get_current_prices(outcome_i)
+                    if current_p_yes is not None and current_p_no is not None:
+                        if p['yes_no'] == 'YES':
+                            filled_capital += float(p['tokens']) * current_p_yes
+                        else:
+                            filled_capital += float(p['tokens']) * current_p_no
+                    else:
+                        # Fallback to $0.50 if prices unavailable
+                        filled_capital += float(p['tokens']) * 0.5
+        except Exception:
+            # Fallback calculation if price fetching fails
+            filled_capital = sum(
+                float(p['tokens']) * 0.5
+                for p in positions 
+                if float(p['tokens']) > 0
+            )
         
         total_committed = open_order_capital + filled_capital
         st.metric("Capital Committed", f"${total_committed:.2f}")
@@ -923,6 +1115,15 @@ st.write("Latest trades across all outcomes")
 # Fragment for recent trades - updates at batch interval
 @st.fragment(run_every=batch_interval_s)
 def recent_trades_fragment():
+    # Check if we have cached data and it's recent
+    cache_key = 'trades_cache'
+    current_time = time.time()
+    
+    if (cache_key in st.session_state and 
+        'timestamp' in st.session_state[cache_key] and 
+        current_time - st.session_state[cache_key]['timestamp'] < batch_interval_s):
+        return st.session_state[cache_key]['data']
+    
     try:
         # Get all recent trades across all outcomes
         # Note: trades table has both buy_user_id and sell_user_id, so we need to handle this differently
@@ -942,19 +1143,30 @@ def recent_trades_fragment():
             users = client.table('users').select('user_id, display_name').in_('user_id', list(user_ids)).execute().data
             users_data = {u['user_id']: u['display_name'] for u in users}
         
-        return {
+        result = {
             'success': True,
             'trades': trades,
             'users_data': users_data,
             'error': None
         }
+        
+        # Cache the result
+        st.session_state[cache_key] = {
+            'data': result,
+            'timestamp': current_time
+        }
+        
+        return result
     except Exception as e:
-        return {
+        error_result = {
             'success': False,
             'trades': [],
             'users_data': {},
             'error': str(e)
         }
+        
+        # Don't cache errors, but return them
+        return error_result
 
 # Get recent trades using fragment for live updates
 trades_data = recent_trades_fragment()

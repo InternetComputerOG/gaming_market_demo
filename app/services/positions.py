@@ -62,31 +62,44 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
         total_cost = price * size  # Total cost for the tokens
         fee_per_user = fee / Decimal('2')  # Split fee between buyer and seller
         
-        # Update buyer position (gains tokens)
-        buyer_current_tokens = Decimal(str(fetch_user_position(buy_user_id, outcome_i, yes_no)))
-        buyer_new_tokens = buyer_current_tokens + size
-        update_user_position(buy_user_id, outcome_i, yes_no, float(buyer_new_tokens))
+        # All system user IDs - these should never have balance/position updates
+        SYSTEM_USER_IDS = {
+            '00000000-0000-0000-0000-000000000000',  # AMM System
+            '11111111-1111-1111-1111-111111111111',  # Limit YES Pool
+            '22222222-2222-2222-2222-222222222222',  # Limit NO Pool
+            '33333333-3333-3333-3333-333333333333',  # Limit Pool
+            '44444444-4444-4444-4444-444444444444',  # Market User
+        }
         
-        # Update seller position (loses tokens)
-        seller_current_tokens = Decimal(str(fetch_user_position(sell_user_id, outcome_i, yes_no)))
-        seller_new_tokens = seller_current_tokens - size
-        if seller_new_tokens < Decimal('0'):
-            raise ValueError(f"Insufficient tokens for sell: user {sell_user_id} has {seller_current_tokens} {yes_no} tokens, trying to sell {size}")
-        update_user_position(sell_user_id, outcome_i, yes_no, float(seller_new_tokens))
+        # Update buyer position (gains tokens) - only for real users
+        if buy_user_id not in SYSTEM_USER_IDS:
+            buyer_current_tokens = Decimal(str(fetch_user_position(buy_user_id, outcome_i, yes_no)))
+            buyer_new_tokens = buyer_current_tokens + size
+            update_user_position(buy_user_id, outcome_i, yes_no, float(buyer_new_tokens))
         
-        # Update buyer balance (pays cost + fee)
-        buyer_balance = Decimal(str(fetch_user_balance(buy_user_id)))
-        buyer_charge = total_cost + fee_per_user
-        buyer_new_balance = buyer_balance - buyer_charge
-        if buyer_new_balance < Decimal('0'):
-            raise ValueError(f"Insufficient balance for buy: user {buy_user_id} has {buyer_balance}, needs {buyer_charge}")
-        update_user_balance(buy_user_id, float(buyer_new_balance))
+        # Update seller position (loses tokens) - only for real users
+        if sell_user_id not in SYSTEM_USER_IDS:
+            seller_current_tokens = Decimal(str(fetch_user_position(sell_user_id, outcome_i, yes_no)))
+            seller_new_tokens = seller_current_tokens - size
+            if seller_new_tokens < Decimal('0'):
+                raise ValueError(f"Insufficient tokens for sell: user {sell_user_id} has {seller_current_tokens} {yes_no} tokens, trying to sell {size}")
+            update_user_position(sell_user_id, outcome_i, yes_no, float(seller_new_tokens))
         
-        # Update seller balance (receives proceeds - fee)
-        seller_balance = Decimal(str(fetch_user_balance(sell_user_id)))
-        seller_proceeds = total_cost - fee_per_user
-        seller_new_balance = seller_balance + seller_proceeds
-        update_user_balance(sell_user_id, float(seller_new_balance))
+        # Update buyer balance (pays cost + fee) - only for real users
+        if buy_user_id not in SYSTEM_USER_IDS:
+            buyer_balance = Decimal(str(fetch_user_balance(buy_user_id)))
+            buyer_charge = total_cost + fee_per_user
+            buyer_new_balance = buyer_balance - buyer_charge
+            if buyer_new_balance < Decimal('0'):
+                raise ValueError(f"Insufficient balance for buy: user {buy_user_id} has {buyer_balance}, needs {buyer_charge}")
+            update_user_balance(buy_user_id, float(buyer_new_balance))
+        
+        # Update seller balance (receives proceeds - fee) - only for real users
+        if sell_user_id not in SYSTEM_USER_IDS:
+            seller_balance = Decimal(str(fetch_user_balance(sell_user_id)))
+            seller_proceeds = total_cost - fee_per_user
+            seller_new_balance = seller_balance + seller_proceeds
+            update_user_balance(sell_user_id, float(seller_new_balance))
         
         # Update engine state token quantities per TDD requirements
         # Cross-matches update both q_yes and q_no (TDD Line 175: "Update q_yes_i += Δ, q_no_i += Δ")
@@ -120,20 +133,22 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
         # Note: Solvency validation moved to batch-level processing to avoid rejecting legitimate fills
         # Individual fills may temporarily violate solvency during batch processing
         
-        # Update trade counts for both users
+        # Update trade counts for both users - only for real users
         db = get_db()
         
         # Update buyer trade count
-        buyer_data = db.table('users').select('trade_count').eq('user_id', buy_user_id).execute().data
-        if buyer_data:
-            buyer_trade_count = buyer_data[0]['trade_count'] + 1
-            db.table('users').update({'trade_count': buyer_trade_count}).eq('user_id', buy_user_id).execute()
+        if buy_user_id not in SYSTEM_USER_IDS:
+            buyer_data = db.table('users').select('trade_count').eq('user_id', buy_user_id).execute().data
+            if buyer_data:
+                buyer_trade_count = buyer_data[0]['trade_count'] + 1
+                db.table('users').update({'trade_count': buyer_trade_count}).eq('user_id', buy_user_id).execute()
         
         # Update seller trade count
-        seller_data = db.table('users').select('trade_count').eq('user_id', sell_user_id).execute().data
-        if seller_data:
-            seller_trade_count = seller_data[0]['trade_count'] + 1
-            db.table('users').update({'trade_count': seller_trade_count}).eq('user_id', sell_user_id).execute()
+        if sell_user_id not in SYSTEM_USER_IDS:
+            seller_data = db.table('users').select('trade_count').eq('user_id', sell_user_id).execute().data
+            if seller_data:
+                seller_trade_count = seller_data[0]['trade_count'] + 1
+                db.table('users').update({'trade_count': seller_trade_count}).eq('user_id', sell_user_id).execute()
             
     except Exception as e:
         # Log the error with context for debugging
