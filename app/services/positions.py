@@ -156,7 +156,7 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
         print(f"Fill data: {fill}")
         raise ValueError(f"Failed to update positions from fill: {e}")
 
-def apply_payouts(resolution_data: Dict[str, Any], state: EngineState) -> None:
+def apply_resolution_payouts(resolution_data: Dict[str, Any], state: EngineState) -> None:
     """
     Apply payouts from resolution, updating balances and zeroing positions.
     Ties to TDD: Payouts based on actual q_yes/q_no (excluding virtual); handles multi-res eliminations by burning positions for eliminated outcomes.

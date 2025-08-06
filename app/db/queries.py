@@ -244,14 +244,25 @@ def insert_events(events: List[Dict[str, Any]]) -> None:
     db = get_db()
     
     # Define the supported fields for the events table schema
-    # Only include fields that actually exist in the database schema
-    # Based on the error messages, 'payout_total', 'freed', and 'timestamp' don't exist
-    supported_fields = {'type', 'outcome_i', 'event_id'}
+    # Based on schema.sql lines 134-141: event_id, type, payload, ts_ms are all supported
+    # Fixed: Added 'payload' and 'ts_ms' which are required NOT NULL fields in schema
+    supported_fields = {'type', 'outcome_i', 'event_id', 'payload', 'ts_ms'}
     
     # Filter events to only include supported fields
     filtered_events = []
     for event in events:
         filtered_event = {k: v for k, v in event.items() if k in supported_fields}
+        # Ensure required fields are present
+        if 'type' not in filtered_event:
+            print(f"Warning: Event missing required 'type' field: {event}")
+            continue
+        if 'payload' not in filtered_event:
+            # Provide default empty payload if missing
+            filtered_event['payload'] = {}
+        if 'ts_ms' not in filtered_event:
+            # Provide current timestamp if missing
+            from app.utils import get_current_ms
+            filtered_event['ts_ms'] = get_current_ms()
         filtered_events.append(filtered_event)
     
     if filtered_events:
@@ -260,7 +271,7 @@ def insert_events(events: List[Dict[str, Any]]) -> None:
         except Exception as e:
             # Log the error but don't crash the resolution process
             print(f"Warning: Failed to insert events: {e}")
-            print(f"Events that failed: {filtered_events}")
+            print(f"Events data: {filtered_events}")
 
 # Metrics queries
 def update_metrics(metrics: Dict[str, Any]) -> None:

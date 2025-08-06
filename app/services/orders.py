@@ -312,17 +312,25 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
         # Calculate total estimated cost including fees
         est_total_cost = total_cost + total_fee
         
+        # Include gas fee in total estimated cost per Implementation Plan requirements
+        gas_fee = Decimal(str(params.get('gas_fee', 0)))
+        total_est_cost = est_total_cost + gas_fee
+        
+        breakdown = {
+            'lob_fill': lob_fill,
+            'amm_fill': amm_fill,
+            'total_fee': total_fee,
+            'effective_price': effective_price,
+            'filled_amount': total_filled
+        }
+        
         return {
-            'estimated_slippage': slippage,
+            'estimated_slippage': float(slippage),
             'would_reject': would_reject,
-            'est_cost': est_total_cost,
-            'breakdown': {
-                'lob_fill': lob_fill,
-                'amm_fill': amm_fill,
-                'total_fee': total_fee,
-                'effective_price': effective_price,
-                'filled_amount': total_filled
-            }
+            'est_cost': float(est_total_cost),
+            'total_est_cost': float(total_est_cost),  # Include gas fee for UI display
+            'gas_fee': float(gas_fee),
+            'breakdown': breakdown
         }
         
     except Exception as e:

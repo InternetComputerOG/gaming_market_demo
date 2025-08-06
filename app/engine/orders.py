@@ -241,12 +241,12 @@ def apply_orders(
             if is_buy:
                 X = buy_cost_yes(binary, remaining, params_dyn, f_i)
             else:
-                X = sell_received_yes(binary, remaining, params_dyn, f_i)
+                X = sell_received_yes(binary, remaining, params, f_i, params_dyn)
         else:
             if is_buy:
                 X = buy_cost_no(binary, remaining, params_dyn, f_i)
             else:
-                X = sell_received_no(binary, remaining, params_dyn, f_i)
+                X = sell_received_no(binary, remaining, params, f_i, params_dyn)
         # Compute new price after impact (penalty already applied in AMM cost functions)
         new_p_yes, new_p_no = get_new_prices_after_impact(binary, remaining, X, f_i, is_buy, is_yes)
         effective_p = new_p_yes if is_yes else new_p_no

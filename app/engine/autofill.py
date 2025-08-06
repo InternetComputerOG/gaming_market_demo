@@ -38,10 +38,10 @@ def trigger_auto_fills(state: EngineState, i: int, X: Decimal, is_buy: bool, par
         if j == i:  # Skip the binary where the order was executed
             continue
             
-        # Calculate diversion based on cross-impact
-        # This is a simplified calculation - the actual implementation would
-        # use the impact functions to determine the proper diversion amount
-        zeta = params.get('zeta', Decimal('0.1'))
+        # Calculate diversion based on cross-impact using dynamic parameters
+        from .impact_functions import compute_dynamic_params
+        dyn_params = compute_dynamic_params(params, current_time)
+        zeta = dyn_params['zeta']
         n_active = len(active_binaries)
         
         if n_active > 1:
@@ -92,7 +92,7 @@ def binary_search_max_delta(pool_tick: Decimal, is_buy: bool, is_yes: bool, bina
                     high = mid
 
             else:
-                X_mid = sell_received_yes(binary, mid, params, f_i) if is_yes else sell_received_no(binary, mid, params, f_i)
+                X_mid = sell_received_yes(binary, mid, params, f_i, dyn_params) if is_yes else sell_received_no(binary, mid, params, f_i, dyn_params)
                 p_mid = get_new_p_yes_after_sell(binary, mid, X_mid, f_i) if is_yes else get_new_p_no_after_sell(binary, mid, X_mid, f_i)
                 charge_mid = pool_tick * mid
                 surplus_mid = X_mid - charge_mid  # For sells, we receive X_mid and pay charge_mid
@@ -246,7 +246,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 surplus = charge - X  # For buys: what we charge minus what it costs
                 print(f"DEBUG: Buy - X={X}, charge={charge}, surplus={surplus}")
             else:
-                X = sell_received_yes(binary, delta, params, f_j) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j)
+                X = sell_received_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j, dyn_params)
                 charge = usdc_amount(pool_tick * delta)  # What we pay to pool holders
                 surplus = X - charge  # For sells: what we receive minus what we pay
                 print(f"DEBUG: Sell - X={X}, charge={charge}, surplus={surplus}")
@@ -254,8 +254,9 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             if surplus <= Decimal('0'):
                 continue
             
-            # Apply caps
-            cap_delta = (params['af_cap_frac'] * abs(diversion)) / pool_tick
+            # Apply caps per TDD: cap = af_cap_frac * diverted_collateral (ζ * X)
+            # Use current dynamic zeta for proper scaling
+            cap_delta = (params['af_cap_frac'] * zeta * abs(X)) / pool_tick
             print(f"DEBUG: cap_delta = {cap_delta}, delta = {delta}, af_cap_frac = {params['af_cap_frac']}, diversion = {diversion}")
             if delta > cap_delta:
                 delta = cap_delta
@@ -265,7 +266,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                     charge = pool_tick * delta
                     surplus = charge - X
                 else:
-                    X = sell_received_yes(binary, delta, params, f_j) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j)
+                    X = sell_received_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j, dyn_params)
                     charge = pool_tick * delta
                     surplus = X - charge
             

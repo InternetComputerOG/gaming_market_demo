@@ -87,7 +87,7 @@ def buy_cost_yes(binary: BinaryState, delta: Decimal, params: EngineParams, f_i:
     return price_value(X)  # Quantize to USDC_DECIMALS? Wait, cost in USDC, so usdc_amount(X) but context uses PRICE_DECIMALS for prices, but costs are amounts.
 
 
-def sell_received_yes(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal) -> Decimal:
+def sell_received_yes(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal, dyn_params: Dict[str, Decimal] = None) -> Decimal:
     """
     Computes received X for selling delta YES tokens in the binary, using quadratic solve and penalty.
     Per TDD: X = delta * (mu * p' + nu * p) / (mu + nu) - kappa * delta^2, with p' = (q_yes_eff - delta) / (L - f_i * X).
@@ -97,9 +97,15 @@ def sell_received_yes(binary: BinaryState, delta: Decimal, params: EngineParams,
         return Decimal('0')
     validate_size(delta)
 
-    mu = Decimal(params['mu_start'])
-    nu = Decimal(params['nu_start'])
-    kappa = Decimal(params['kappa_start'])
+    # Use dynamic parameters if provided, otherwise fall back to static
+    if dyn_params:
+        mu = dyn_params['mu']
+        nu = dyn_params['nu']
+        kappa = dyn_params['kappa']
+    else:
+        mu = Decimal(params['mu_start'])
+        nu = Decimal(params['nu_start'])
+        kappa = Decimal(params['kappa_start'])
     p_min = Decimal(params['p_min'])
     eta = Decimal(params['eta'])
 
@@ -122,7 +128,7 @@ def sell_received_yes(binary: BinaryState, delta: Decimal, params: EngineParams,
 
     p_prime = get_new_p_yes_after_sell(binary, delta, X, f_i)
     if p_prime < p_min:
-        X *= (p_min / p_prime)**eta
+        X *= (p_min / p_prime)**eta  # DEFLATE received amount per TDD line 157
 
     return price_value(X)
 
@@ -160,15 +166,21 @@ def buy_cost_no(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: 
     return price_value(X)
 
 
-def sell_received_no(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal) -> Decimal:
+def sell_received_no(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal, dyn_params: Dict[str, Decimal] = None) -> Decimal:
     """Symmetric to sell_received_yes but for NO, no virtual."""
     if delta == Decimal('0'):
         return Decimal('0')
     validate_size(delta)
 
-    mu = Decimal(params['mu_start'])
-    nu = Decimal(params['nu_start'])
-    kappa = Decimal(params['kappa_start'])
+    # Use dynamic parameters if provided, otherwise fall back to static
+    if dyn_params:
+        mu = dyn_params['mu']
+        nu = dyn_params['nu']
+        kappa = dyn_params['kappa']
+    else:
+        mu = Decimal(params['mu_start'])
+        nu = Decimal(params['nu_start'])
+        kappa = Decimal(params['kappa_start'])
     p_min = Decimal(params['p_min'])
     eta = Decimal(params['eta'])
 
@@ -191,6 +203,6 @@ def sell_received_no(binary: BinaryState, delta: Decimal, params: EngineParams, 
 
     p_prime = (q - delta) / (L - f_i * X)
     if p_prime < p_min:
-        X *= (p_min / p_prime)**eta
+        X *= (p_min / p_prime)**eta  # DEFLATE received amount per TDD line 157
 
     return price_value(X)

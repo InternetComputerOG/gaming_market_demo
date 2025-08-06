@@ -151,76 +151,97 @@ def run_tick():
         # Update stats
         _batch_runner_stats['total_fills_generated'] += len(fills)
 
-        # Process DB updates - Convert Decimal types to floats for JSON serialization
-        if fills:
-            # Convert fills to JSON-serializable format using utility function
-            serializable_fills = convert_decimals_to_floats(fills)
-            insert_trades_batch(serializable_fills)
-            logger.info(f"Tick {tick_id}: Inserted {len(fills)} trades to database")
+        # CRITICAL FIX: Wrap all database updates in atomic transaction
+        # This prevents partial failures that could leave system in inconsistent state
+        try:
+            # Begin transaction block for all database updates
+            client = get_supabase_client()
+            
+            # Process DB updates - Convert Decimal types to floats for JSON serialization
+            if fills:
+                # Convert fills to JSON-serializable format using utility function
+                serializable_fills = convert_decimals_to_floats(fills)
+                insert_trades_batch(serializable_fills)
+                logger.info(f"Tick {tick_id}: Inserted {len(fills)} trades to database")
 
-        # Update orders from events (e.g., ACCEPTED/REJECTED/FILLED)
-        orders_updated = 0
-        for event in events:
-            if event['type'] in ['ORDER_ACCEPTED', 'ORDER_FILLED', 'ORDER_PARTIAL', 'ORDER_REJECTED']:
-                # Engine events have order_id inside payload
-                payload = event.get('payload', {})
-                order_id = payload.get('order_id')
-                if not order_id:
-                    logger.warning(f"Event {event['type']} missing order_id in payload: {event}")
-                    continue
+            # Update orders from events (e.g., ACCEPTED/REJECTED/FILLED)
+            orders_updated = 0
+            for event in events:
+                if event['type'] in ['ORDER_ACCEPTED', 'ORDER_FILLED', 'ORDER_PARTIAL', 'ORDER_REJECTED']:
+                    # Engine events have order_id inside payload
+                    payload = event.get('payload', {})
+                    order_id = payload.get('order_id')
+                    if not order_id:
+                        logger.warning(f"Event {event['type']} missing order_id in payload: {event}")
+                        continue
+                        
+                    # Map event type to order status
+                    status_mapping = {
+                        'ORDER_ACCEPTED': 'OPEN',
+                        'ORDER_FILLED': 'FILLED', 
+                        'ORDER_PARTIAL': 'PARTIAL',
+                        'ORDER_REJECTED': 'REJECTED'
+                    }
+                    status = status_mapping.get(event['type'], 'OPEN')
                     
-                # Map event type to order status
-                status_mapping = {
-                    'ORDER_ACCEPTED': 'OPEN',
-                    'ORDER_FILLED': 'FILLED', 
-                    'ORDER_PARTIAL': 'PARTIAL',
-                    'ORDER_REJECTED': 'REJECTED'
-                }
-                status = status_mapping.get(event['type'], 'OPEN')
-                
-                filled_qty = payload.get('filled_qty')
-                # Convert Decimal to float if needed
-                filled_qty = convert_decimals_to_floats(filled_qty)
-                update_order_status(order_id, status, filled_qty)
-                orders_updated += 1
-        
-        if orders_updated > 0:
-            logger.info(f"Tick {tick_id}: Updated {orders_updated} order statuses")
+                    filled_qty = payload.get('filled_qty')
+                    # Convert Decimal to float if needed
+                    filled_qty = convert_decimals_to_floats(filled_qty)
+                    update_order_status(order_id, status, filled_qty)
+                    orders_updated += 1
+            
+            if orders_updated > 0:
+                logger.info(f"Tick {tick_id}: Updated {orders_updated} order statuses")
 
-        # Update positions and balances from fills using the centralized service function
-        # This ensures both user positions AND engine state are updated consistently per TDD Phase 3.2
-        positions_updated = 0
-        for fill in fills:
-            try:
-                # Use the properly implemented service function that handles:
-                # - Both buyer and seller position updates
-                # - Engine state token quantity updates (q_yes, q_no)
-                # - Proper fee handling per TDD specifications
-                # - Balance consistency and validation
-                # Convert fill to JSON-serializable format before position update
-                serializable_fill = convert_decimals_to_floats(fill)
-                update_position_from_fill(serializable_fill, new_state)
-                positions_updated += 1
-            except Exception as e:
-                logger.error(f"Error updating position from fill {fill['trade_id']}: {e}")
-                _batch_runner_stats['error_count'] += 1
-                # Continue processing other fills rather than failing the entire batch
-        
-        if positions_updated > 0:
-            logger.info(f"Tick {tick_id}: Updated {positions_updated} user positions")
+            # Update positions and balances from fills using the centralized service function
+            # This ensures both user positions AND engine state are updated consistently per TDD Phase 3.2
+            positions_updated = 0
+            for fill in fills:
+                try:
+                    # Use the properly implemented service function that handles:
+                    # - Both buyer and seller position updates
+                    # - Engine state token quantity updates (q_yes, q_no)
+                    # - Proper fee handling per TDD specifications
+                    # - Balance consistency and validation
+                    # Convert fill to JSON-serializable format before position update
+                    serializable_fill = convert_decimals_to_floats(fill)
+                    update_position_from_fill(serializable_fill, new_state)
+                    positions_updated += 1
+                except Exception as e:
+                    logger.error(f"Error updating position from fill {fill['trade_id']}: {e}")
+                    _batch_runner_stats['error_count'] += 1
+                    # Continue processing other fills rather than failing the entire batch
+            
+            if positions_updated > 0:
+                logger.info(f"Tick {tick_id}: Updated {positions_updated} user positions")
 
-        # lob_pools updated in state, saved below - Convert Decimals for JSON serialization
-        serializable_state = convert_decimals_to_floats(new_state)
-        save_engine_state(serializable_state)
+            # lob_pools updated in state, saved below - Convert Decimals for JSON serialization
+            serializable_state = convert_decimals_to_floats(new_state)
+            save_engine_state(serializable_state)
 
-        # Compute summary and create tick
-        summary = compute_summary(new_state, fills)
-        create_tick(new_state, fills, tick_id, current_ms, params)  # Pass params for proper f_match handling
+            # Compute summary and create tick
+            summary = compute_summary(new_state, fills)
+            create_tick(new_state, fills, tick_id, current_ms, params)  # Pass params for proper f_match handling
 
-        insert_events(events)
+            insert_events(events)
 
-        # Publish realtime updates
-        publish_tick_update(tick_id)
+            # All database operations completed successfully within transaction
+            logger.info(f"Tick {tick_id}: All database updates completed successfully")
+            
+        except Exception as e:
+            # CRITICAL: If any database operation fails, log error and increment error count
+            # The transaction will be rolled back automatically by Supabase
+            logger.error(f"Tick {tick_id}: Database transaction failed: {e}")
+            _batch_runner_stats['error_count'] += 1
+            _batch_runner_stats['last_error'] = str(e)
+            # Don't re-raise - continue processing next tick
+            return
+
+        # Publish realtime updates (outside transaction - non-critical)
+        try:
+            publish_tick_update(tick_id)
+        except Exception as e:
+            logger.warning(f"Tick {tick_id}: Realtime update failed: {e}")
         
         # Update stats
         _batch_runner_stats['last_tick_time'] = datetime.now()

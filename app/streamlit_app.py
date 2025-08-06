@@ -1047,11 +1047,89 @@ with pos_tab3:
         else:
             st.write("*No pending orders*")
     
+    # Portfolio Metrics Fragment - updates with price changes for accurate portfolio value
+    @st.fragment(run_every=batch_interval_s)
+    def portfolio_metrics_fragment():
+        try:
+            # Get current user balance
+            current_balance = float(fetch_user_balance(user_id))
+            
+            # Calculate token holdings value at current prices
+            token_holdings_value = 0
+            for p in positions:
+                if float(p['tokens']) > 0:
+                    outcome_i = int(p['outcome_i'])
+                    current_p_yes, current_p_no = get_current_prices(outcome_i)
+                    if current_p_yes is not None and current_p_no is not None:
+                        if p['yes_no'] == 'YES':
+                            token_holdings_value += float(p['tokens']) * current_p_yes
+                        else:
+                            token_holdings_value += float(p['tokens']) * current_p_no
+                    else:
+                        # Fallback to $0.50 if prices unavailable
+                        token_holdings_value += float(p['tokens']) * 0.5
+            
+            # Calculate total committed capital from open orders only
+            # Note: We track committed capital in pending orders, not historical cost basis of filled positions
+            open_order_capital = 0
+            for order in orders:
+                if order['type'] == 'LIMIT' and order['limit_price'] is not None:
+                    # LIMIT orders: remaining size * limit price
+                    open_order_capital += float(order['remaining']) * float(order['limit_price'])
+                elif order['type'] == 'MARKET':
+                    # MARKET orders: estimate using current price (they execute quickly)
+                    try:
+                        outcome_i = int(order['outcome_i'])
+                        current_p_yes, current_p_no = get_current_prices(outcome_i)
+                        if current_p_yes is not None and current_p_no is not None:
+                            if order['yes_no'] == 'YES':
+                                estimated_price = current_p_yes
+                            else:
+                                estimated_price = current_p_no
+                            open_order_capital += float(order['remaining']) * estimated_price
+                        else:
+                            # Fallback to $0.50 if prices unavailable
+                            open_order_capital += float(order['remaining']) * 0.5
+                    except (ValueError, KeyError, TypeError):
+                        # Fallback for malformed order data
+                        open_order_capital += float(order['remaining']) * 0.5
+            
+            # Calculate gas fees
+            try:
+                config = load_config()
+                gas_fee_per_tx = config.get('params', {}).get('gas_fee_per_tx', 0.0)
+                user_data = client.table('users').select('trade_count').eq('user_id', user_id).single().execute()
+                if user_data.data:
+                    total_gas_spent = float(user_data.data['trade_count']) * gas_fee_per_tx
+                else:
+                    total_gas_spent = 0.0
+            except Exception:
+                total_gas_spent = 0.0
+            
+            return {
+                'current_balance': current_balance,
+                'token_holdings_value': token_holdings_value,
+                'open_order_capital': open_order_capital,
+                'total_gas_spent': total_gas_spent
+            }
+        except Exception as e:
+            st.error(f"Error calculating portfolio metrics: {e}")
+            return {
+                'current_balance': 0.0,
+                'token_holdings_value': 0.0,
+                'open_order_capital': 0.0,
+                'total_gas_spent': 0.0
+            }
+    
     # Overall portfolio metrics
     st.write("---")
     st.write("**🎯 Portfolio Metrics**")
     
-    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    # Get metrics from fragment
+    metrics = portfolio_metrics_fragment()
+    
+    # Display metrics in columns
+    metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
     
     with metric_col1:
         st.metric("Active Positions", len([p for p in positions if float(p['tokens']) > 0]))
@@ -1060,53 +1138,100 @@ with pos_tab3:
         st.metric("Open Orders", len(orders))
     
     with metric_col3:
-        # Calculate total committed capital (open orders + filled positions cost basis)
-        # Capital in open LIMIT orders
-        open_order_capital = sum(
-            float(order['remaining']) * float(order['limit_price']) 
-            for order in orders 
-            if order['type'] == 'LIMIT' and order['limit_price'] is not None and order['is_buy']
-        )
-        
-        # Capital already invested in filled positions (estimated using current market value)
-        # Note: This uses current market prices as approximation since we don't track cost basis
-        filled_capital = 0
-        try:
-            for p in positions:
-                if float(p['tokens']) > 0:
-                    outcome_i = int(p['outcome_i'])
-                    # Get current market price for this outcome/token type
-                    current_p_yes, current_p_no = get_current_prices(outcome_i)
-                    if current_p_yes is not None and current_p_no is not None:
-                        if p['yes_no'] == 'YES':
-                            filled_capital += float(p['tokens']) * current_p_yes
-                        else:
-                            filled_capital += float(p['tokens']) * current_p_no
-                    else:
-                        # Fallback to $0.50 if prices unavailable
-                        filled_capital += float(p['tokens']) * 0.5
-        except Exception:
-            # Fallback calculation if price fetching fails
-            filled_capital = sum(
-                float(p['tokens']) * 0.5
-                for p in positions 
-                if float(p['tokens']) > 0
-            )
-        
-        total_committed = open_order_capital + filled_capital
-        st.metric("Capital Committed", f"${total_committed:.2f}")
+        st.metric("Capital Committed", f"${metrics['open_order_capital']:.2f}")
     
     with metric_col4:
-        # Calculate total potential payout from positions
-        total_max_payout = sum(
-            float(p['tokens']) 
-            for p in positions 
-            if float(p['tokens']) > 0
-        )
-        st.metric("Max Potential Payout", f"${total_max_payout:.2f}")
+        # USD Portfolio Value = Balance + Token Holdings at Current Price
+        total_portfolio_value = metrics['current_balance'] + metrics['token_holdings_value']
+        st.metric("USD Portfolio Value", f"${total_portfolio_value:.2f}")
+    
+    with metric_col5:
+        st.metric("Gas Spent", f"${metrics['total_gas_spent']:.2f}")
 
-    # Placeholder for Gas Spent (assume fetched or 0)
-    st.metric("Gas Spent", "$0.00")
+    # Per-Outcome Potential Payouts Table
+    st.write("---")
+    st.write("**💰 Potential Payouts by Outcome**")
+    
+    # Group positions by outcome
+    outcome_positions = {}
+    for p in positions:
+        if float(p['tokens']) > 0:
+            outcome_i = int(p['outcome_i'])
+            if outcome_i not in outcome_positions:
+                outcome_positions[outcome_i] = {'YES': 0, 'NO': 0}
+            outcome_positions[outcome_i][p['yes_no']] += float(p['tokens'])
+    
+    if outcome_positions:
+        # Create payout table
+        payout_data = []
+        
+        # Get outcome names from config
+        try:
+            config = load_config()
+            outcome_names = config.get('params', {}).get('outcome_names', [])
+        except:
+            outcome_names = []
+        
+        for outcome_i in sorted(outcome_positions.keys()):
+            # Get outcome name
+            if outcome_i < len(outcome_names):
+                outcome_name = outcome_names[outcome_i]
+            else:
+                outcome_name = f"Outcome {outcome_i + 1}"
+            
+            yes_tokens = outcome_positions[outcome_i]['YES']
+            no_tokens = outcome_positions[outcome_i]['NO']
+            
+            # Calculate winnings if this outcome wins
+            # If outcome i wins: YES tokens pay $1 each, NO tokens pay $0
+            # If outcome i loses: YES tokens pay $0, NO tokens pay $1 each
+            
+            if_wins_winnings = yes_tokens * 1.0 + no_tokens * 0.0  # YES pays $1, NO pays $0
+            if_loses_winnings = yes_tokens * 0.0 + no_tokens * 1.0  # YES pays $0, NO pays $1
+            
+            # Calculate P/L (Profit/Loss) = Winnings - Capital Committed
+            # For P/L calculation, we need to estimate what was paid for these tokens
+            # Since we don't track cost basis, use current market value as approximation
+            try:
+                current_p_yes, current_p_no = get_current_prices(outcome_i)
+                if current_p_yes is not None and current_p_no is not None:
+                    estimated_cost = yes_tokens * current_p_yes + no_tokens * current_p_no
+                else:
+                    estimated_cost = (yes_tokens + no_tokens) * 0.5
+            except:
+                estimated_cost = (yes_tokens + no_tokens) * 0.5
+            
+            if_wins_pl = if_wins_winnings - estimated_cost
+            if_loses_pl = if_loses_winnings - estimated_cost
+            
+            # Add row for "if this outcome wins"
+            payout_data.append({
+                'Outcome': f"{outcome_name} WINS",
+                'YES Tokens': f"{yes_tokens:.2f}",
+                'NO Tokens': f"{no_tokens:.2f}",
+                'Winnings': f"${if_wins_winnings:.2f}",
+                'P/L': f"${if_wins_pl:+.2f}"
+            })
+            
+            # Add row for "if this outcome loses" (only if user has NO tokens that would pay out)
+            if if_loses_winnings > 0:
+                payout_data.append({
+                    'Outcome': f"{outcome_name} LOSES",
+                    'YES Tokens': f"{yes_tokens:.2f}",
+                    'NO Tokens': f"{no_tokens:.2f}",
+                    'Winnings': f"${if_loses_winnings:.2f}",
+                    'P/L': f"${if_loses_pl:+.2f}"
+                })
+        
+        if payout_data:
+            # Display as table
+            import pandas as pd
+            df = pd.DataFrame(payout_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No active positions to display payouts for.")
+    else:
+        st.info("No active positions to display payouts for.")
 
 # Recent Trades Section - moved to bottom of page
 st.header("📈 Recent Trades")
