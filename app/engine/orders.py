@@ -39,6 +39,8 @@ class Fill(TypedDict):
     tick_id: int
     ts_ms: int
     fill_type: str  # 'CROSS_MATCH', 'LOB_MATCH', 'AMM', 'AUTO_FILL'
+    price_yes: Decimal | None  # For cross-matches: YES limit price
+    price_no: Decimal | None   # For cross-matches: NO limit price
 
 def apply_orders(
     state: EngineState,
@@ -117,7 +119,25 @@ def apply_orders(
                     continue
                     
                 cm_fills = cross_match_binary(state, b['outcome_i'], params_dyn, current_time, tick_id=0)  # tick_id placeholder
-                fills.extend(cm_fills)
+                
+                # Convert cross-match fills to proper Fill format with dual prices
+                for cm_fill in cm_fills:
+                    fill: Fill = {
+                        'trade_id': cm_fill['trade_id'],
+                        'buy_user_id': cm_fill['buy_user_id'],
+                        'sell_user_id': cm_fill['sell_user_id'],
+                        'outcome_i': cm_fill['outcome_i'],
+                        'yes_no': cm_fill['yes_no'],
+                        'price': price_value(cm_fill['price_yes']),  # Use YES price as primary price for compatibility
+                        'size': usdc_amount(cm_fill['size']),
+                        'fee': usdc_amount(cm_fill['fee']),
+                        'tick_id': cm_fill['tick_id'],
+                        'ts_ms': cm_fill['ts_ms'],
+                        'fill_type': 'CROSS_MATCH',
+                        'price_yes': price_value(cm_fill['price_yes']),
+                        'price_no': price_value(cm_fill['price_no'])
+                    }
+                    fills.append(fill)
                 
                 # Validate solvency after cross-matching
                 try:
@@ -155,7 +175,25 @@ def apply_orders(
         # Market orders get filled at limit order prices (at-or-better execution)
         # Fees are applied transparently and separately from execution prices
         lob_fills, remaining = match_market_order(state, i, is_buy, is_yes, size, params_dyn, current_time, tick_id=0)
-        fills.extend(lob_fills)
+        
+        # Convert LOB fills to proper Fill format with fill_type
+        for lob_fill in lob_fills:
+            fill: Fill = {
+                'trade_id': lob_fill['trade_id'],
+                'buy_user_id': lob_fill['buy_user_id'],
+                'sell_user_id': lob_fill['sell_user_id'],
+                'outcome_i': lob_fill['outcome_i'],
+                'yes_no': lob_fill['yes_no'],
+                'price': price_value(lob_fill['price']),
+                'size': usdc_amount(lob_fill['size']),
+                'fee': usdc_amount(lob_fill['fee']),
+                'tick_id': lob_fill['tick_id'],
+                'ts_ms': lob_fill['ts_ms'],
+                'fill_type': 'LOB_MATCH',
+                'price_yes': None,  # LOB matches have single price
+                'price_no': None
+            }
+            fills.append(fill)
         
         # Update q_yes/q_no for LOB market matches (per TDD: market orders vs LOB should update the traded q)
         if lob_fills:
@@ -235,7 +273,9 @@ def apply_orders(
             'fee': usdc_amount(fee),
             'tick_id': 0,  # Placeholder
             'ts_ms': current_time,
-            'fill_type': 'AMM'
+            'fill_type': 'AMM',
+            'price_yes': None,  # AMM fills have single price
+            'price_no': None
         }
         fills.append(fill)
         # Update token supplies to reflect the trade
@@ -288,6 +328,35 @@ def apply_orders(
         # Trigger auto-fills if enabled
         if params_dyn['af_enabled']:
             auto_fill_events = trigger_auto_fills(state, i, X, is_buy, params_dyn, current_time)
+            
+            # Convert auto-fill events to Fill objects for proper processing
+            for af_event in auto_fill_events:
+                if af_event['type'] in ['auto_fill_buy', 'auto_fill_sell']:
+                    # Extract auto-fill details from event
+                    af_is_buy = af_event['type'] == 'auto_fill_buy'
+                    af_is_yes = af_event['is_yes']
+                    af_delta = af_event['delta']
+                    af_tick = af_event['tick']
+                    af_price = price_value(Decimal(af_tick) * Decimal(params_dyn['tick_size']))
+                    
+                    # Create auto-fill as Fill object
+                    af_fill: Fill = {
+                        'trade_id': str(uuid.uuid4()),
+                        'buy_user_id': AMM_USER_ID if af_is_buy else AMM_USER_ID,  # Auto-fills are AMM-like
+                        'sell_user_id': AMM_USER_ID if not af_is_buy else AMM_USER_ID,
+                        'outcome_i': af_event['binary_id'],
+                        'yes_no': 'YES' if af_is_yes else 'NO',
+                        'price': af_price,
+                        'size': usdc_amount(af_delta),
+                        'fee': usdc_amount(Decimal('0')),  # Auto-fills capture seigniorage, no separate fee
+                        'tick_id': 0,  # Placeholder
+                        'ts_ms': current_time,
+                        'fill_type': 'AUTO_FILL',
+                        'price_yes': None,  # Auto-fills have single price like AMM
+                        'price_no': None
+                    }
+                    fills.append(af_fill)
+            
             events.extend(auto_fill_events)
         events.append({'type': 'ORDER_FILLED', 'payload': {'order_id': order['order_id']}})
 

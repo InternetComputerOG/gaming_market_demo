@@ -79,9 +79,24 @@ def run_tick():
         current_ms = get_current_ms()
         current_time_sec = safe_divide(Decimal(current_ms - start_ts_ms), Decimal(1000))  # seconds for interpolation
 
-        # Fetch next tick_id (max +1)
-        current_tick_data = get_current_tick()
-        tick_id = (current_tick_data.get('tick_id', 0) if current_tick_data else 0) + 1
+        # Generate next tick_id safely to avoid duplicates
+        # Use timestamp-based approach with fallback to ensure uniqueness
+        try:
+            current_tick_data = get_current_tick()
+            max_tick_id = current_tick_data.get('tick_id', 0) if current_tick_data else 0
+            
+            # Use current timestamp as base tick_id to ensure uniqueness
+            timestamp_tick_id = int(current_ms / 1000)  # Convert ms to seconds for reasonable tick_id
+            
+            # Ensure tick_id is always incrementing (never goes backwards)
+            tick_id = max(max_tick_id + 1, timestamp_tick_id)
+            
+            logger.debug(f"Generated tick_id {tick_id} (max_existing: {max_tick_id}, timestamp_based: {timestamp_tick_id})")
+            
+        except Exception as e:
+            logger.warning(f"Error generating tick_id, using fallback: {e}")
+            # Fallback: use current timestamp in seconds
+            tick_id = int(current_ms / 1000)
 
         # Fetch all open orders, sorted by ts_ms
         db_orders = fetch_open_orders(None)  # Fetch from database
@@ -200,7 +215,7 @@ def run_tick():
 
         # Compute summary and create tick
         summary = compute_summary(new_state, fills)
-        create_tick(new_state, fills, tick_id)  # Inserts tick and updates metrics
+        create_tick(new_state, fills, tick_id, current_ms, params)  # Pass params for proper f_match handling
 
         insert_events(events)
 

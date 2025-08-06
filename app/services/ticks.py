@@ -25,7 +25,7 @@ class Fill(TypedDict):
     tick_id: int
     ts_ms: int
     # Enhanced fields for LOB integration
-    fill_type: str  # 'CROSS_MATCH', 'LOB_MATCH', 'AMM'
+    fill_type: str  # 'CROSS_MATCH', 'LOB_MATCH', 'AMM', 'AUTO_FILL'
     price_yes: Optional[float]  # For cross-matching: YES limit price
     price_no: Optional[float]   # For cross-matching: NO limit price
     
@@ -169,6 +169,10 @@ def compute_summary(state: EngineState, fills: List[Fill], cross_match_events: L
         elif fill_type == 'LOB_MATCH':
             summary['lob_activity']['total_lob_volume'] += fill['size']
             summary['lob_activity']['lob_match_count'] += 1
+        elif fill_type == 'AUTO_FILL':
+            # Auto-fills are AMM-like but triggered by cross-impacts
+            summary['lob_activity']['amm_volume'] += fill['size']
+            summary['lob_activity']['amm_fill_count'] += 1
         else:  # AMM
             summary['lob_activity']['amm_volume'] += fill['size']
             summary['lob_activity']['amm_fill_count'] += 1
@@ -222,9 +226,22 @@ def normalize_fills_for_summary(fills: List[Dict[str, Any]]) -> List[Fill]:
     
     for fill in fills:
         # Determine fill type and normalize structure
-        if 'price_yes' in fill and 'price_no' in fill:
-            # Cross-matching fill - use effective price based on yes_no
+        # First check if fill_type is already provided (from engine_orders.py)
+        if 'fill_type' in fill and fill['fill_type'] in ['CROSS_MATCH', 'LOB_MATCH', 'AMM', 'AUTO_FILL']:
+            fill_type = fill['fill_type']
+        elif 'price_yes' in fill and 'price_no' in fill:
+            # Cross-matching fill - infer from dual prices
             fill_type = 'CROSS_MATCH'
+        elif fill.get('buy_user_id') == AMM_USER_ID or fill.get('sell_user_id') == AMM_USER_ID:
+            # AMM fill - infer from AMM_USER_ID
+            fill_type = 'AMM'
+        else:
+            # Regular LOB match - fallback
+            fill_type = 'LOB_MATCH'
+        
+        # Create normalized fill based on fill_type
+        if fill_type == 'CROSS_MATCH':
+            # Cross-matching fill - use effective price based on yes_no
             effective_price = fill['price_yes'] if fill['yes_no'] == 'YES' else fill['price_no']
             
             normalized_fill: Fill = {
@@ -242,27 +259,8 @@ def normalize_fills_for_summary(fills: List[Dict[str, Any]]) -> List[Fill]:
                 'price_yes': float(fill['price_yes']),
                 'price_no': float(fill['price_no']),
             }
-        elif fill.get('buy_user_id') == AMM_USER_ID or fill.get('sell_user_id') == AMM_USER_ID:
-            # AMM fill
-            fill_type = 'AMM'
-            normalized_fill: Fill = {
-                'trade_id': fill['trade_id'],
-                'buy_user_id': fill['buy_user_id'],
-                'sell_user_id': fill['sell_user_id'],
-                'outcome_i': fill['outcome_i'],
-                'yes_no': fill['yes_no'],
-                'price': float(fill['price']),
-                'size': float(fill['size']),
-                'fee': float(fill['fee']),
-                'tick_id': fill['tick_id'],
-                'ts_ms': fill['ts_ms'],
-                'fill_type': fill_type,
-                'price_yes': None,
-                'price_no': None,
-            }
         else:
-            # Regular LOB match
-            fill_type = 'LOB_MATCH'
+            # AMM, LOB_MATCH, or AUTO_FILL - single price fills
             normalized_fill: Fill = {
                 'trade_id': fill['trade_id'],
                 'buy_user_id': fill['buy_user_id'],
@@ -284,7 +282,7 @@ def normalize_fills_for_summary(fills: List[Dict[str, Any]]) -> List[Fill]:
     return normalized_fills
 
 
-def extract_cross_match_events(fills: List[Fill], state: EngineState) -> List[CrossMatchEvent]:
+def extract_cross_match_events(fills: List[Fill], state: EngineState, params: Dict[str, Any]) -> List[CrossMatchEvent]:
     """
     Extract cross-matching events from fills for detailed tracking.
     
@@ -312,8 +310,8 @@ def extract_cross_match_events(fills: List[Fill], state: EngineState) -> List[Cr
             
             # Calculate solvency metrics
             solvency_condition = float(price_yes + price_no)
-            # Assuming f_match from typical parameters - in production this should be passed
-            f_match = 0.02  # Default fee rate
+            # Use actual f_match from params instead of hardcoded value
+            f_match = params.get('f_match', 0.02)  # Use actual f_match from params
             min_required = float(Decimal('1') + Decimal(str(f_match)) * (price_yes + price_no) / Decimal('2'))
             
             event: CrossMatchEvent = {
@@ -341,7 +339,7 @@ def extract_cross_match_events(fills: List[Fill], state: EngineState) -> List[Cr
     return cross_match_events
 
 
-def create_tick(state: EngineState, raw_fills: List[Dict[str, Any]], tick_id: int, timestamp: int) -> None:
+def create_tick(state: EngineState, raw_fills: List[Dict[str, Any]], tick_id: int, timestamp: int, params: Dict[str, Any] = None) -> None:
     """
     Create a tick record with enhanced LOB integration and cross-matching event recording.
     
@@ -360,7 +358,7 @@ def create_tick(state: EngineState, raw_fills: List[Dict[str, Any]], tick_id: in
     normalized_fills = normalize_fills_for_summary(raw_fills)
     
     # Extract cross-matching events for detailed tracking
-    cross_match_events = extract_cross_match_events(normalized_fills, state)
+    cross_match_events = extract_cross_match_events(normalized_fills, state, params or {})
     
     # Compute enhanced summary with LOB activity
     summary = compute_summary(state, normalized_fills, cross_match_events)

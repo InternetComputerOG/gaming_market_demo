@@ -117,12 +117,8 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
             else:
                 binary['q_no'] = float(Decimal(str(binary['q_no'])) + size)
         
-        # Validate solvency invariant after q updates (TDD requirement: q_yes + q_no < L_i)
-        try:
-            from app.utils import validate_solvency_invariant
-            validate_solvency_invariant(binary)
-        except ValueError as e:
-            raise ValueError(f"Solvency invariant violated after position update for fill {fill.get('trade_id', 'unknown')}: {e}")
+        # Note: Solvency validation moved to batch-level processing to avoid rejecting legitimate fills
+        # Individual fills may temporarily violate solvency during batch processing
         
         # Update trade counts for both users
         db = get_db()

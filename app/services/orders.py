@@ -58,7 +58,7 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
         
         # Validate limit price bounds per TDD requirements
         try:
-            validate_limit_price_bounds(limit_price, params)
+            validate_limit_price_bounds(limit_price, Decimal(str(params['p_min'])), Decimal(str(params['p_max'])))
         except ValueError as e:
             raise ValueError(f"Limit price validation failed: {e}")
         

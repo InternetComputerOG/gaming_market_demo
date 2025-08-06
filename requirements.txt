@@ -6,3 +6,4 @@ pytest
 streamlit
 supabase
 typing_extensions
+selenium

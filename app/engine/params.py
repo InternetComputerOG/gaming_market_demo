@@ -26,7 +26,7 @@ def get_default_params() -> Params:
         'alpha': 1.0,
         'beta': 1.0,  # Fixed: Test expects beta=1.0
         'trade_fee': 0.01,
-        'liquidity_initial': 10000.0 / 3,  # Align with TDD Z/N example, assuming N=3 default
+        'liquidity_initial': 1000.0 / 3,  # Align with TDD Z/N example, assuming N=3 default
         'min_liquidity': 0.0,  # Fixed: Test expects min_liquidity=0.0
         'max_imbalance_ratio': 0.99,  # Fixed: Tied to p_max, should be <1
         'min_auto_fill': 0.1,

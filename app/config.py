@@ -59,9 +59,9 @@ def get_default_engine_params() -> EngineParams:
     return EngineParams(
         n_outcomes=3,
         outcome_names=["Outcome A", "Outcome B", "Outcome C"],
-        z=10000.0,
+        z=1000.0,
         gamma=0.0001,
-        q0=10000.0/6,  # (z/n_outcomes)/2 = (10000/3)/2 = 10000/6 to ensure p_yes = p_no = 0.5
+        q0=1000.0/6,  # (z/n_outcomes)/2 = (1000/3)/2 = 1000/6 to ensure p_yes = p_no = 0.5
         f=0.01,
         p_max=0.99,
         p_min=0.01,
@@ -76,14 +76,14 @@ def get_default_engine_params() -> EngineParams:
         af_enabled=True,
         mr_enabled=False,
         vc_enabled=True,
-        mu_start=1.0,
-        mu_end=1.0,
+        mu_start=2.0,
+        mu_end=2.0,
         nu_start=1.0,
         nu_end=1.0,
         kappa_start=0.001,
         kappa_end=0.001,
         zeta_start=0.1,
-        zeta_end=0.1,
+        zeta_end=0.01,
         interpolation_mode='continue',
         res_schedule=[],
         total_duration=3600,
@@ -92,6 +92,6 @@ def get_default_engine_params() -> EngineParams:
         freeze_durs=[],
         elim_outcomes=[],
         starting_balance=1000.0,
-        gas_fee=0.0,
-        batch_interval_ms=1000,
+        gas_fee=0.01,
+        batch_interval_ms=5000,
     )

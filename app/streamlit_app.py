@@ -1,5 +1,6 @@
 import streamlit as st
 import time
+import json
 from uuid import uuid4
 from typing import Dict, Any, List, Optional
 from decimal import Decimal
@@ -10,13 +11,14 @@ from app.utils import get_current_ms, usdc_amount, price_value, validate_size, v
 from app.db.queries import load_config, insert_user, fetch_user_balance, fetch_positions, fetch_user_orders, get_current_tick, fetch_pools, fetch_engine_state
 from app.services.orders import submit_order, cancel_order, get_user_orders, estimate_slippage
 from app.services.positions import fetch_user_positions
+from app.services.realtime import get_realtime_client, publish_event
 from app.engine.state import get_binary, get_p_yes, get_p_no
 
 client = get_supabase_client()
 
 if 'user_id' not in st.session_state:
-    display_name = st.text_input("Enter display name")
-    if st.button("Join"):
+    display_name = st.text_input("Enter display name", key="display-name-input")
+    if st.button("Join", key="join-button"):
         config = load_config()
         user_id = str(uuid4())
         insert_user(user_id, display_name, float(config['params']['starting_balance']))
@@ -32,47 +34,83 @@ if 'user_id' not in st.session_state:
 user_id = st.session_state['user_id']
 config = load_config()
 status = config['status']
+params: Dict[str, Any] = config['params']
+
+# Initialize realtime data containers in session state
+if 'realtime_prices' not in st.session_state:
+    st.session_state['realtime_prices'] = {}
+if 'realtime_trades' not in st.session_state:
+    st.session_state['realtime_trades'] = []
+if 'realtime_user_balance' not in st.session_state:
+    st.session_state['realtime_user_balance'] = None
+if 'realtime_user_positions' not in st.session_state:
+    st.session_state['realtime_user_positions'] = []
+if 'realtime_user_orders' not in st.session_state:
+    st.session_state['realtime_user_orders'] = []
+if 'realtime_status' not in st.session_state:
+    st.session_state['realtime_status'] = status
+if 'realtime_user_count' not in st.session_state:
+    st.session_state['realtime_user_count'] = 0
+
+# Fragment-based realtime updates using Streamlit's native approach
+# Initialize fragment update timers
+if 'last_price_update' not in st.session_state:
+    st.session_state.last_price_update = 0
+if 'last_leaderboard_update' not in st.session_state:
+    st.session_state.last_leaderboard_update = 0
+
+# Get batch interval from config for fragment update timing
+batch_interval_ms = params.get('batch_interval_ms', 5000)
+batch_interval_s = batch_interval_ms / 1000.0
+
+# Helper function for getting current prices (used by price fragment)
+def get_current_prices(outcome_i):
+    """Get current YES and NO prices for an outcome"""
+    engine_state = fetch_engine_state()
+    binary = get_binary(engine_state, outcome_i)
+    current_p_yes = get_p_yes(binary)
+    current_p_no = get_p_no(binary)
+    return current_p_yes, current_p_no
 
 # Enhanced waiting room with realtime status updates
 if status == 'DRAFT':
     st.title("🎮 Gaming Market Demo")
     st.header("⏳ Waiting Room")
     
-    # Show joined users count with error handling
-    try:
-        users = client.table('users').select('*').execute().data
-        st.info(f"👥 **{len(users)} players joined** - Waiting for admin to start the demo...")
-    except Exception as e:
-        st.error(f"⚠️ Connection issue: {str(e)}")
-        users = []
-    
-    # Initialize session state for status monitoring
+    # Initialize waiting room variables
+    if 'refresh_counter' not in st.session_state:
+        st.session_state.refresh_counter = 0
     if 'last_status_check' not in st.session_state:
         st.session_state.last_status_check = time.time()
-        st.session_state.refresh_counter = 0
     
-    # Check for status updates every 3 seconds (controlled refresh)
-    current_time = time.time()
-    time_since_last_check = current_time - st.session_state.last_status_check
+    # Calculate time since last check
+    time_since_last_check = time.time() - st.session_state.last_status_check
     
-    if time_since_last_check > 3:
-        st.session_state.last_status_check = current_time
-        st.session_state.refresh_counter += 1
+    # Show joined users count with realtime updates
+    try:
+        # Check if we have realtime user count
+        if st.session_state['realtime_user_count'] > 0:
+            user_count = st.session_state['realtime_user_count']
+            users = client.table('users').select('*').execute().data  # Still need this for player list
+        else:
+            # Fallback to static fetch and store in realtime cache
+            users = client.table('users').select('*').execute().data
+            user_count = len(users)
+            st.session_state['realtime_user_count'] = user_count
         
-        # Reload config to check for status changes with error handling
-        try:
-            fresh_config = load_config()
-            if fresh_config['status'] != 'DRAFT':
-                st.success("🚀 Demo is starting! Redirecting to trading interface...")
-                time.sleep(1)  # Brief pause for user to see the message
-                st.rerun()
-            else:
-                # Only refresh if we haven't refreshed too many times
-                if st.session_state.refresh_counter < 100:  # Prevent infinite loops
-                    st.rerun()
-        except Exception as e:
-            st.warning(f"⚠️ Could not check status: {str(e)}")
-            # Continue without refreshing if there's an error
+        # Display user count
+        st.markdown(f'👥 **{user_count} players joined** - Waiting for admin to start the demo...')
+        
+    except Exception as e:
+        st.error(f"⚠️ Connection issue: {str(e)}")
+        user_count = 0
+        users = []
+    
+    # Check for realtime status updates (replace polling with realtime check)
+    if st.session_state['realtime_status'] != 'DRAFT':
+        st.success("🚀 Demo is starting! Redirecting to trading interface...")
+        time.sleep(1)  # Brief pause for user to see the message
+        st.rerun()
     
     # Manual refresh button
     col1, col2, col3 = st.columns([1, 1, 1])
@@ -136,56 +174,179 @@ if status == 'RESOLVED':
     st.pyplot(fig)
     st.stop()
 
-params: Dict[str, Any] = config['params']
 current_ms = get_current_ms()
 
-# Handle both start_ts_ms (integer) and start_ts (ISO string) formats
-if 'start_ts_ms' in config and config['start_ts_ms']:
+# Simplified and robust start time calculation
+start_ms = None
+
+# Try to get start_ts_ms from params first (where timer_service stores it)
+if 'params' in config and config['params'] and 'start_ts_ms' in config['params']:
+    start_ms = int(config['params']['start_ts_ms'])
+# Fallback to top-level start_ts_ms
+elif 'start_ts_ms' in config and config['start_ts_ms']:
     start_ms = int(config['start_ts_ms'])
+# Fallback to start_ts if present
 elif 'start_ts' in config and config['start_ts']:
-    # Parse ISO timestamp and convert to milliseconds
-    # Handle timestamps with variable decimal precision
-    timestamp_str = config['start_ts'].replace('Z', '+00:00')
-    
-    # Fix decimal precision issue: pad or truncate to 6 digits after decimal
-    import re
-    if '.' in timestamp_str:
-        # Split at the decimal point
-        before_decimal, after_decimal_and_tz = timestamp_str.split('.', 1)
-        # Extract decimal digits and timezone
-        decimal_match = re.match(r'(\d+)(.*)', after_decimal_and_tz)
-        if decimal_match:
-            decimal_digits, tz_part = decimal_match.groups()
-            # Pad or truncate to exactly 6 digits (microseconds)
-            decimal_digits = decimal_digits.ljust(6, '0')[:6]
-            timestamp_str = f"{before_decimal}.{decimal_digits}{tz_part}"
-    
-    start_dt = datetime.fromisoformat(timestamp_str)
-    start_ms = int(start_dt.timestamp() * 1000)
+    try:
+        # Simple ISO timestamp parsing
+        timestamp_str = config['start_ts'].replace('Z', '+00:00')
+        start_dt = datetime.fromisoformat(timestamp_str)
+        start_ms = int(start_dt.timestamp() * 1000)
+    except Exception as e:
+        print(f"Error parsing start_ts: {e}")
+        start_ms = None
+
+# If no valid start time found, show "Not Started" message
+if start_ms is None:
+    st.metric("Time to End", "Demo not started")
 else:
-    # Fallback to current time if no start time is set
-    start_ms = current_ms
+    # Calculate time remaining
+    elapsed_ms = current_ms - start_ms
+    total_duration_ms = params.get('total_duration', 0) * 1000
+    
+    if total_duration_ms > 0:
+        time_to_end = max(0, (total_duration_ms - elapsed_ms) / 1000)
+        
+        # Create a placeholder for the countdown timer
+        countdown_placeholder = st.empty()
+        
+        # Format time nicely
+        def format_time(seconds):
+            mins, secs = divmod(int(seconds), 60)
+            hours, mins = divmod(mins, 60)
+            if hours > 0:
+                return f"{hours:02d}:{mins:02d}:{secs:02d}"
+            else:
+                return f"{mins:02d}:{secs:02d}"
+        
+        # Display countdown with progress bar
+        progress = min(1.0, elapsed_ms / total_duration_ms) if total_duration_ms > 0 else 0
+        
+        # Client-side countdown timer using config parameters (no external state needed)
+        countdown_js = f"""
+        <script>
+        (function() {{
+            // Calculate initial time remaining based on config
+            const startTime = {start_ms};
+            const totalDuration = {total_duration_ms};
+            const currentTime = Date.now();
+            
+            let timeRemaining = Math.max(0, (startTime + totalDuration - currentTime) / 1000);
+            
+            function updateCountdown() {{
+                if (timeRemaining <= 0) {{
+                    // Timer finished - could trigger completion event
+                    document.body.setAttribute('data-timer-finished', 'true');
+                    return;
+                }}
+                
+                timeRemaining -= 1;
+                const elapsed = (totalDuration / 1000) - timeRemaining;
+                const progress = elapsed / (totalDuration / 1000);
+                
+                // Format time function
+                function formatTime(seconds) {{
+                    const mins = Math.floor(seconds / 60);
+                    const secs = Math.floor(seconds % 60);
+                    const hours = Math.floor(mins / 60);
+                    const displayMins = mins % 60;
+                    
+                    if (hours > 0) {{
+                        return hours.toString().padStart(2, '0') + ':' + 
+                               displayMins.toString().padStart(2, '0') + ':' + 
+                               secs.toString().padStart(2, '0');
+                    }} else {{
+                        return displayMins.toString().padStart(2, '0') + ':' + 
+                               secs.toString().padStart(2, '0');
+                    }}
+                }}
+                
+                // Update countdown display in the parent window (outside iframe)
+                try {{
+                    const message = {{
+                        type: 'countdown_update',
+                        timeRemaining: formatTime(timeRemaining),
+                        elapsed: formatTime(elapsed),
+                        progress: progress
+                    }};
+                    window.parent.postMessage(message, '*');
+                }} catch (e) {{
+                    // Fallback: update within iframe if cross-origin issues
+                    console.log('Countdown update:', formatTime(timeRemaining));
+                }}
+            }}
+            
+            // Update immediately, then every second
+            updateCountdown();
+            setInterval(updateCountdown, 1000);
+            
+            console.log('Client-side countdown timer initialized');
+        }})();
+        </script>
+        """
+        
+        # Create countdown display containers that can be updated
+        countdown_container = st.empty()
+        progress_container = st.empty()
+        
+        with countdown_container.container():
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.metric("Time Remaining", format_time(time_to_end), key="countdown-remaining")
+                if total_duration_ms > 0:
+                    st.progress(progress, text=f"Progress: {int(progress * 100)}%")
+            with col2:
+                st.metric("Elapsed", format_time(elapsed_ms / 1000), key="countdown-elapsed")
+        
+        # Inject the countdown JavaScript
+        st.components.v1.html(countdown_js, height=0)
+    else:
+        st.metric("Time to End", "Duration not configured")
 
-elapsed_ms = current_ms - start_ms
-total_duration_ms = params['total_duration'] * 1000
-time_to_end = max(0, (total_duration_ms - elapsed_ms) / 1000)
-st.metric("Time to End", f"{time_to_end:.0f} seconds")
-
+# Replace st.experimental_rerun() with st.rerun() in the tick check block
+# Original lines (approximate, based on code structure around the if time.time() - st.session_state['last_check'] > 1 block):
 if time.time() - st.session_state['last_check'] > 1:
     st.session_state['last_check'] = time.time()
     current_tick = get_current_tick()
     if current_tick and current_tick['tick_id'] > st.session_state['last_tick']:
         st.session_state['last_tick'] = current_tick['tick_id']
-        st.experimental_rerun()
+        st.rerun()  # Changed from st.experimental_rerun()
 
-balance = fetch_user_balance(user_id)
-st.metric("Balance", f"${float(balance):.2f}")
+# Fragment for user balance - updates at batch interval
+@st.fragment(run_every=batch_interval_s)
+def balance_fragment():
+    try:
+        balance = fetch_user_balance(user_id)
+        st.metric("Balance", f"${float(balance):.2f}")
+        return float(balance)
+    except Exception as e:
+        st.warning(f"Could not load balance: {str(e)}")
+        return 0
+
+balance = balance_fragment()
 
 st.sidebar.header("Leaderboard")
-users = client.table('users').select('*').execute().data
-leaderboard = sorted(users, key=lambda u: float(u['balance']) + float(u['net_pnl']), reverse=True)[:5]
-for rank, user in enumerate(leaderboard, 1):
-    st.sidebar.write(f"{rank}. {user['display_name']}: ${float(user['balance']) + float(user['net_pnl']):.2f}")
+
+# Fragment for leaderboard - updates at 2x batch interval (less frequent)
+@st.fragment(run_every=batch_interval_s * 2)
+def leaderboard_fragment():
+    try:
+        users = client.table('users').select('*').execute().data
+        leaderboard = sorted(users, key=lambda u: float(u['balance']) + float(u['net_pnl']), reverse=True)[:5]
+        
+        for rank, user in enumerate(leaderboard, 1):
+            total_value = float(user['balance']) + float(user['net_pnl'])
+            st.sidebar.write(f"{rank}. {user['display_name']}: ${total_value:.2f}")
+        
+        # Display user count
+        st.sidebar.markdown(f'👥 **{len(users)} players online**')
+        
+        return len(users)
+    except Exception as e:
+        st.sidebar.warning(f"Could not load leaderboard: {str(e)}")
+        return 0
+
+user_count = leaderboard_fragment()
 
 outcome_tabs = st.tabs([f"Outcome {i+1}" for i in range(params['n_outcomes'])])
 
@@ -194,11 +355,11 @@ for outcome_i, tab in enumerate(outcome_tabs):
         col1, col2 = st.columns(2)
         with col1:
             st.header("Order Ticket")
-            yes_no = st.radio("Token", ['YES', 'NO'], key=f"token_{outcome_i}")
-            direction = st.radio("Direction", ['Buy', 'Sell'], key=f"direction_{outcome_i}")
+            yes_no = st.radio("Token", ['YES', 'NO'], key=f"yes-no-radio-{outcome_i}")
+            direction = st.radio("Direction", ['Buy', 'Sell'], key=f"buy-sell-radio-{outcome_i}")
             is_buy = direction == 'Buy'
-            order_type = st.selectbox("Type", ['MARKET', 'LIMIT'], key=f"order_type_{outcome_i}")
-            size_input = st.number_input("Size", min_value=0.01, value=1.0, key=f"size_{outcome_i}")
+            order_type = st.selectbox("Type", ['MARKET', 'LIMIT'], key=f"order-type-select-{outcome_i}")
+            size_input = st.number_input("Size", min_value=0.01, value=1.0, key=f"size-input-{outcome_i}")
             size = usdc_amount(size_input)
             limit_price_input: Optional[float] = None
             max_slippage_input: Optional[float] = None
@@ -213,7 +374,7 @@ for outcome_i, tab in enumerate(outcome_tabs):
                 if limit_price_input is not None:
                     limit_price = price_value(limit_price_input)
                     validate_price(limit_price)
-                    validate_limit_price_bounds(limit_price, params)
+                    validate_limit_price_bounds(limit_price, Decimal(str(params['p_min'])), Decimal(str(params['p_max'])))
                 if max_slippage_input is not None:
                     validate_price(price_value(max_slippage_input))
                 est = estimate_slippage(outcome_i, yes_no, size, is_buy, price_value(max_slippage_input) if max_slippage_input else None)
@@ -308,13 +469,19 @@ for outcome_i, tab in enumerate(outcome_tabs):
                     # True limit price enforcement explanation for limit orders
                     if order_type == 'LIMIT':
                         st.info("✅ **True Limit Price Enforcement**: You will pay/receive exactly your limit price. All fees are separate and transparent.")
-                        
+                    
+                    # Additional checks
+                    if 'est' in locals() and est['would_reject']:
+                        st.error("Order would be rejected: Estimated slippage too high")
+                    if execution_cost + trading_fee_est + float(gas_fee) > float(balance):
+                        st.warning(f"Insufficient balance: Need ${execution_cost + trading_fee_est + float(gas_fee) - float(balance):.2f} more")
+                
             except ValueError as e:
                 st.error(str(e))
                 est = {'would_reject': True}
 
             disable_submit = est['would_reject'] if 'est' in locals() else True
-            if st.button("Submit Order", disabled=disable_submit, key=f"submit_{outcome_i}"):
+            if st.button("Submit Order", disabled=disable_submit, key=f"submit-order-button-{outcome_i}"):
                 try:
                     order_data = {
                         'outcome_i': outcome_i,
@@ -335,24 +502,29 @@ for outcome_i, tab in enumerate(outcome_tabs):
         with col2:
             st.header("📊 Order Book")
             
-            # Get current market prices for reference
-            try:
-                engine_state = fetch_engine_state()
-                binary = get_binary(engine_state, outcome_i)
-                current_p_yes = get_p_yes(binary)
-                current_p_no = get_p_no(binary)
-                
-                # Display current market prices prominently
-                price_col1, price_col2 = st.columns(2)
-                with price_col1:
-                    st.metric("YES Market Price", f"${current_p_yes:.4f}", delta=None)
-                with price_col2:
-                    st.metric("NO Market Price", f"${current_p_no:.4f}", delta=None)
-                
-                st.write(f"**Spread:** ${abs(current_p_yes - current_p_no):.4f}")
-            except Exception as e:
-                st.warning("Could not load current market prices")
-                current_p_yes = current_p_no = None
+            # Fragment for current market prices - updates at batch interval
+            @st.fragment(run_every=batch_interval_s)
+            def price_fragment():
+                try:
+                    current_p_yes, current_p_no = get_current_prices(outcome_i)
+                    
+                    # Display current market prices
+                    price_col1, price_col2 = st.columns(2)
+                    with price_col1:
+                        st.metric("YES Market Price", f"${current_p_yes:.4f}", delta=None)
+                    with price_col2:
+                        st.metric("NO Market Price", f"${current_p_no:.4f}", delta=None)
+                    
+                    # Spread calculation
+                    spread = abs(current_p_yes - current_p_no)
+                    st.markdown(f"**Spread:** ${spread:.4f}")
+                    
+                    return current_p_yes, current_p_no
+                except Exception as e:
+                    st.warning("Could not load current market prices")
+                    return None, None
+            
+            current_p_yes, current_p_no = price_fragment()
             
             # Enhanced order book aggregation with user position tracking
             pools: List[Dict[str, Any]] = fetch_pools(outcome_i)
@@ -490,8 +662,39 @@ for outcome_i, tab in enumerate(outcome_tabs):
                 st.info(f"👤 **You have positions in {total_user_positions} LOB pools** - Look for the 👤 indicator above")
 
         st.header("Recent Trades")
-        trades = client.table('trades').select('*').eq('outcome_i', outcome_i).order('ts_ms', desc=True).limit(10).execute().data
-        st.table([{ 'Price': float(t['price']), 'Size': float(t['size']), 'Side': t['yes_no'] } for t in trades])
+        
+        # Get trades with realtime updates
+        try:
+            # Check if we have realtime trades for this outcome
+            outcome_trades = [t for t in st.session_state['realtime_trades'] if t.get('outcome_i') == outcome_i]
+            
+            if outcome_trades:
+                # Use realtime trades data
+                trades_data = outcome_trades[:10]  # Latest 10 trades
+            else:
+                # Fallback to static fetch and store in realtime cache
+                trades = client.table('trades').select('*').eq('outcome_i', outcome_i).order('ts_ms', desc=True).limit(10).execute().data
+                trades_data = trades
+                # Store in realtime cache
+                st.session_state['realtime_trades'].extend(trades)
+                # Keep only latest 50 trades to prevent memory bloat
+                st.session_state['realtime_trades'] = st.session_state['realtime_trades'][-50:]
+            
+            # Display trades with realtime attributes
+            if trades_data:
+                st.markdown(f'<div data-realtime="trades" data-outcome="{outcome_i}">', unsafe_allow_html=True)
+                st.table([{ 
+                    'Price': f"${float(t['price']):.4f}", 
+                    'Size': f"{float(t['size']):.2f}", 
+                    'Side': t['yes_no'],
+                    'Time': f"{t.get('ts_ms', 0) // 1000}s ago" if 'ts_ms' in t else "Recent"
+                } for t in trades_data])
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.info("No recent trades for this outcome")
+                
+        except Exception as e:
+            st.warning(f"Could not load recent trades: {str(e)}")
 
 # Enhanced Position and Order Management
 st.header("💼 Your Portfolio")
@@ -501,7 +704,19 @@ pos_tab1, pos_tab2, pos_tab3 = st.tabs(["🏆 Filled Positions", "⏳ Open Limit
 
 with pos_tab1:
     st.subheader("🏆 Your Filled Positions")
-    positions = fetch_user_positions(user_id)
+    
+    # Get positions with realtime updates
+    try:
+        # Check if we have realtime positions
+        if st.session_state['realtime_user_positions']:
+            positions = st.session_state['realtime_user_positions']
+        else:
+            # Fallback to static fetch and store in realtime cache
+            positions = fetch_user_positions(user_id)
+            st.session_state['realtime_user_positions'] = positions
+    except Exception as e:
+        st.warning(f"Could not load positions: {str(e)}")
+        positions = []
     
     if positions:
         # Enhanced position display with potential returns
@@ -559,7 +774,19 @@ with pos_tab1:
 
 with pos_tab2:
     st.subheader("⏳ Your Open Limit Orders")
-    orders = get_user_orders(user_id, 'OPEN')
+    
+    # Get orders with realtime updates
+    try:
+        # Check if we have realtime orders
+        if st.session_state['realtime_user_orders']:
+            orders = st.session_state['realtime_user_orders']
+        else:
+            # Fallback to static fetch and store in realtime cache
+            orders = get_user_orders(user_id, 'OPEN')
+            st.session_state['realtime_user_orders'] = orders
+    except Exception as e:
+        st.warning(f"Could not load orders: {str(e)}")
+        orders = []
     
     if orders:
         st.write(f"**You have {len(orders)} open limit orders**")
@@ -623,7 +850,7 @@ with pos_tab2:
                     # Use a unique key for each cancel button
                     cancel_key = f"cancel_confirm_{order['order_id']}_{i}"
                     
-                    if st.button("🗑️ Cancel Order", key=f"cancel_btn_{order['order_id']}_{i}", type="secondary"):
+                    if st.button("🗑️ Cancel Order", key=f"cancel-order-button-{order['order_id']}-{i}", type="secondary"):
                         # Store the order to cancel in session state
                         st.session_state[f'cancel_pending_{order["order_id"]}'] = True
                     
@@ -715,5 +942,8 @@ with pos_tab3:
         )
         st.metric("Max Potential Payout", f"${total_max_payout:.2f}")
 
-if st.button("Refresh"):
+    # Placeholder for Gas Spent (assume fetched or 0)
+    st.metric("Gas Spent", "$0.00")
+
+if st.button("Refresh", key="refresh-button"):
     st.rerun()

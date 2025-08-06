@@ -209,8 +209,8 @@ def run_admin_app():
         st.session_state.authenticated = False
 
     if not st.session_state.authenticated:
-        password = st.text_input("Enter Admin Password", type="password")
-        if st.button("Login"):
+        password = st.text_input("Enter Admin Password", type="password", key="password-input")
+        if st.button("Login", key="login-button"):
             if password == ADMIN_PASSWORD:
                 st.session_state.authenticated = True
                 st.rerun()
@@ -478,7 +478,7 @@ def run_admin_app():
         # Debug information for Start Demo button
         st.caption(f"Debug: Status = '{status}', Can start = {status == 'DRAFT'}")
         
-        start_button_clicked = st.button("Start Demo")
+        start_button_clicked = st.button("Start Demo", key="start-demo-button")
         if start_button_clicked:
             if status == 'DRAFT':
                 try:
@@ -531,7 +531,7 @@ def run_admin_app():
             st.success("Trading resumed.")
     with col_ctrl4:
         # Reset Demo button with confirmation
-        if st.button("🔄 Reset Demo", type="secondary"):
+        if st.button("🔄 Reset Demo", type="secondary", key="reset-demo-button"):
             # Use session state for confirmation dialog
             st.session_state.show_reset_confirmation = True
         
@@ -540,7 +540,7 @@ def run_admin_app():
             st.warning("⚠️ This will completely reset the demo and clear all data!")
             col_confirm1, col_confirm2 = st.columns(2)
             with col_confirm1:
-                if st.button("✅ Confirm Reset", type="primary"):
+                if st.button("✅ Confirm Reset", type="primary", key="confirm-reset-button"):
                     # Reset all demo state
                     reset_success = reset_demo_state()
                     st.session_state.show_reset_confirmation = False

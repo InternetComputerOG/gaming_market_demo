@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Streamlit</title>
+</head>
+<body>
+    <div id="root" class="stApp">
+        <!-- Sidebar Leaderboard -->
+        <div data-testid="stSidebar" class="stSidebar">
+            <h2 data-testid="stMarkdown" class="stMarkdown">Leaderboard</h2>
+            <div data-testid="stMarkdown" class="stMarkdown">isaac: $1000.00</div>
+            <div data-testid="stMarkdown" class="stMarkdown">AMM System: $0.00</div>
+            <div data-testid="stMarkdown" class="stMarkdown">Limit YES Pool: $0.00</div>
+            <div data-testid="stMarkdown" class="stMarkdown">Limit NO Pool: $0.00</div>
+            <div data-testid="stMarkdown" class="stMarkdown">Limit Pool: $0.00</div>
+        </div>
+
+        <!-- Metrics -->
+        <div data-testid="stMetric" class="stMetric">
+            <div data-testid="stMetricLabel">Time to End</div>
+            <div data-testid="stMetricValue">0 seconds</div>
+        </div>
+        <div data-testid="stMetric" class="stMetric">
+            <div data-testid="stMetricLabel">Balance</div>
+            <div data-testid="stMetricValue">$1000.00</div>
+        </div>
+
+        <!-- Outcome Tabs -->
+        <div data-testid="stTabs" class="stTabs" key="outcome-tabs">
+            <div role="tablist">
+                <button role="tab">Outcome 1</button>
+                <button role="tab">Outcome 2</button>
+                <button role="tab">Outcome 3</button>
+            </div>
+            <div role="tabpanel">
+                <!-- Order Ticket (repeated structure for each outcome) -->
+                <h2 data-testid="stMarkdown" class="stMarkdown">Order Ticket</h2>
+                <div data-testid="stRadio" class="stRadio" key="yes-no-radio-0">
+                    <label>Token</label>
+                    <input type="radio" value="YES" checked>
+                    <input type="radio" value="NO">
+                </div>
+                <div data-testid="stRadio" class="stRadio" key="buy-sell-radio-0">
+                    <label>Direction</label>
+                    <input type="radio" value="Buy" checked>
+                    <input type="radio" value="Sell">
+                </div>
+                <div data-testid="stSelectbox" class="stSelectbox" key="order-type-select-0">
+                    <label>Type</label>
+                    <select><option>MARKET</option></select>
+                </div>
+                <div data-testid="stNumberInput" class="stNumberInput" key="size-input-0">
+                    <label>Size</label>
+                    <input type="number">
+                </div>
+                <div data-testid="stNumberInput" class="stNumberInput" key="max_slippage_0">
+                    <label>Max Slippage %</label>
+                    <input type="number">
+                </div>
+                <div data-testid="stCheckbox" class="stCheckbox" key="af_opt_in_0">
+                    <input type="checkbox" checked>Auto-Fill Opt-In
+                </div>
+                <div data-testid="stExpander" class="stExpander" expanded="true">
+                    <summary>📋 Transaction Confirmation</summary>
+                    <div class="row-widget stHorizontal">
+                        <div><p><strong>Token:</strong> YES</p></div>
+                        <div><p><strong>Direction:</strong> Buy</p></div>
+                        <div><p><strong>Size:</strong> 1.00 tokens</p></div>
+                        <div><p><strong>Order Type:</strong> MARKET</p></div>
+                        <div><p><strong>Max Slippage:</strong> 5.0%</p></div>
+                        <div><p><strong>Auto-Fill:</strong> ✅ Yes</p></div>
+                    </div>
+                    <div class="row-widget stHorizontal">
+                        <div><p><strong>Execution Cost:</strong> $0.51</p></div>
+                        <div><p><strong>Trading Fee (est.):</strong> $0.0051</p></div>
+                        <div><p><strong>Gas Fee:</strong> $0.0000</p></div>
+                        <div><p><strong>Total Cost:</strong> $0.51</p></div>
+                        <div><p><strong>Total Fees:</strong> $0.0051</p></div>
+                        <div><p><strong>Effective Price/Token:</strong> $0.5103</p></div>
+                    </div>
+                    <p>Estimated Slippage: 0.04%</p>
+                    <div>
+                        <p><strong>🎯 Potential Returns</strong></p>
+                        <p>🎲 POTENTIAL OUTCOME: Investment: 0.51**IfYESwins:**0.51 **If YES wins:** 0.51**IfYESwins:**1.00 payout Net Profit: $0.49 Return Multiple: 1.98x</p>
+                        <p>✅ Value Opportunity: You're getting tokens at a reasonable price relative to potential payout.</p>
+                    </div>
+                </div>
+                <button data-testid="baseButton-secondary" class="stButton" key="submit-order-button-0">Submit Order</button>
+
+                <!-- Order Book -->
+                <h2 data-testid="stMarkdown" class="stMarkdown">📊 Order Book</h2>
+                <div data-testid="stMetric" class="stMetric">
+                    <div data-testid="stMetricLabel">YES Market Price</div>
+                    <div data-testid="stMetricValue">$0.5000</div>
+                </div>
+                <div data-testid="stMetric" class="stMetric">
+                    <div data-testid="stMetricLabel">NO Market Price</div>
+                    <div data-testid="stMetricValue">$0.5000</div>
+                </div>
+                <p><strong>Spread:</strong> $0.0000</p>
+                <div data-testid="stTabs" class="stTabs">
+                    <div role="tablist">
+                        <button role="tab">📈 YES Token</button>
+                        <button role="tab">📉 NO Token</button>
+                    </div>
+                    <div role="tabpanel">
+                        <h3 data-testid="stMarkdown" class="stMarkdown">YES Token Order Book</h3>
+                        <p><strong>🔴 Asks (Sellers)</strong></p>
+                        <p>No asks available</p>
+                        <p><strong>📊 Current Market Price: $0.5000</strong></p>
+                        <p><strong>🟢 Bids (Buyers)</strong></p>
+                        <p>No bids available</p>
+                    </div>
+                </div>
+
+                <!-- Recent Trades -->
+                <h2 data-testid="stMarkdown" class="stMarkdown">Recent Trades</h2>
+                <div data-testid="stTable" class="stTable">
+                    <table>
+                        <tbody>
+                            <tr><td>empty</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <!-- Repeated tabpanel for Outcome 2 and 3 with identical structure -->
+        </div>
+
+        <!-- Portfolio -->
+        <h2 data-testid="stMarkdown" class="stMarkdown">💼 Your Portfolio</h2>
+        <div data-testid="stTabs" class="stTabs">
+            <div role="tablist">
+                <button role="tab">🏆 Filled Positions</button>
+                <button role="tab">⏳ Open Limit Orders</button>
+                <button role="tab">📊 Portfolio Summary</button>
+            </div>
+            <div role="tabpanel">
+                <h3 data-testid="stMarkdown" class="stMarkdown">🏆 Your Filled Positions</h3>
+                <p>📭 No filled positions yet. Place some orders to start building your portfolio!</p>
+            </div>
+            <div role="tabpanel">
+                <h3 data-testid="stMarkdown" class="stMarkdown">⏳ Your Open Limit Orders</h3>
+                <p>📭 No open limit orders. Your limit orders will appear here once placed.</p>
+                <p>💡 Tip: Limit orders let you set exact prices and potentially get better deals than market orders.</p>
+            </div>
+            <div role="tabpanel">
+                <h3 data-testid="stMarkdown" class="stMarkdown">📊 Portfolio Summary</h3>
+                <div class="row-widget stHorizontal">
+                    <div><p><strong>📈 Current Holdings</strong></p><p>No current holdings</p></div>
+                    <div><p><strong>⏳ Pending Orders</strong></p><p>No pending orders</p></div>
+                </div>
+                <div data-testid="stMarkdown" class="stMarkdown">---</div>
+                <p><strong>🎯 Portfolio Metrics</strong></p>
+                <div class="row-widget stHorizontal">
+                    <div data-testid="stMetric" class="stMetric"><div data-testid="stMetricLabel">Active Positions</div><div data-testid="stMetricValue">0</div></div>
+                    <div data-testid="stMetric" class="stMetric"><div data-testid="stMetricLabel">Open Orders</div><div data-testid="stMetricValue">0</div></div>
+                    <div data-testid="stMetric" class="stMetric"><div data-testid="stMetricLabel">Capital Committed</div><div data-testid="stMetricValue">$0.00</div></div>
+                    <div data-testid="stMetric" class="stMetric"><div data-testid="stMetricLabel">Max Potential Payout</div><div data-testid="stMetricValue">$0.00</div></div>
+                </div>
+                <div data-testid="stMetric" class="stMetric"><div data-testid="stMetricLabel">Gas Spent</div><div data-testid="stMetricValue">$0.00</div></div>
+            </div>
+        </div>
+
+        <!-- Refresh Button -->
+        <button data-testid="baseButton-secondary" class="stButton" key="refresh-button">Refresh</button>
+    </div>
+</body>
+</html>
