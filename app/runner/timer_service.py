@@ -84,12 +84,22 @@ def monitor_loop() -> None:
                     print(f"Freeze duration {freeze_dur_s} seconds completed for round {current_round}.")
 
                     if not is_final:
-                        # Resume trading - store current_round in params
-                        update_config({
-                            'status': 'RUNNING', 
-                            'params': {'current_round': current_round + 1}
-                        })
-                        print(f"Resuming trading after round {current_round}.")
+                        # CRITICAL FIX: Resume trading - only update specific params to avoid overwriting existing ones
+                        resume_ms = get_current_ms()
+                        
+                        # First update status
+                        update_config({'status': 'RUNNING'})
+                        
+                        # Then update only the specific parameters we need to change
+                        # This preserves all existing parameters (zeta_start, mu_start, etc.)
+                        current_config = load_config()
+                        existing_params = current_config.get('params', {})
+                        updated_params = existing_params.copy()
+                        updated_params['current_round'] = current_round + 1
+                        updated_params['round_start_ms'] = resume_ms  # Set for parameter interpolation reset mode
+                        
+                        update_config({'params': updated_params})
+                        print(f"Resuming trading after round {current_round} with round_start_ms={resume_ms}.")
                     else:
                         # Final resolution
                         update_config({'status': 'RESOLVED'})

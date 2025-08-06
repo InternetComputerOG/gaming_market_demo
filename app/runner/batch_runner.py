@@ -77,7 +77,17 @@ def run_tick():
         params = config.get('params', {})
         start_ts_ms = params.get('start_ts_ms', 0)
         current_ms = get_current_ms()
-        current_time_sec = safe_divide(Decimal(current_ms - start_ts_ms), Decimal(1000))  # seconds for interpolation
+        
+        # CRITICAL FIX: Handle parameter interpolation reset for multi-resolution rounds per TDD Addendum
+        effective_start_ms = start_ts_ms
+        if params.get('mr_enabled', False) and params.get('interpolation_mode') == 'reset':
+            # For reset mode, use round_start_ms if available (set by timer_service)
+            round_start_ms = params.get('round_start_ms')
+            if round_start_ms is not None:
+                effective_start_ms = round_start_ms
+                logger.debug(f"Tick {tick_id}: Using round_start_ms {round_start_ms} for parameter interpolation reset")
+        
+        current_time_sec = safe_divide(Decimal(current_ms - effective_start_ms), Decimal(1000))  # seconds for interpolation
 
         # Generate next tick_id safely to avoid duplicates
         # Use timestamp-based approach with fallback to ensure uniqueness
@@ -135,6 +145,29 @@ def run_tick():
 
         state: EngineState = fetch_engine_state()
         params: EngineParams = config['params']  # TypedDict
+        
+        # CRITICAL FIX: Validate parameters before engine calls per Implementation Plan Section 11
+        try:
+            # Validate core parameters that could cause engine crashes
+            if 'zeta_start' in params and params['zeta_start'] <= 0:
+                raise ValueError(f"zeta_start must be > 0, got {params['zeta_start']}")
+            if 'mu_start' in params and params['mu_start'] <= 0:
+                raise ValueError(f"mu_start must be > 0, got {params['mu_start']}")
+            if 'gas_fee' in params and params['gas_fee'] < 0:
+                raise ValueError(f"gas_fee must be >= 0, got {params['gas_fee']}")
+            if 'eta' in params and params['eta'] <= 0:
+                raise ValueError(f"eta must be > 0, got {params['eta']}")
+            if 'nu_start' in params and params['nu_start'] <= 0:
+                raise ValueError(f"nu_start must be > 0, got {params['nu_start']}")
+            
+            logger.debug(f"Tick {tick_id}: Parameter validation passed")
+        except ValueError as e:
+            logger.error(f"Tick {tick_id}: Invalid parameters detected: {e}")
+            logger.error(f"Skipping tick to prevent solvency violations or crashes")
+            return  # Skip this tick to prevent system instability
+        except Exception as e:
+            logger.warning(f"Tick {tick_id}: Parameter validation failed with unexpected error: {e}")
+            # Continue with caution but log the issue
 
         fills: List[Fill]
         new_state: EngineState

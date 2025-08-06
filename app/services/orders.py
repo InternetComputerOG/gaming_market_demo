@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal
 from typing import Dict, Any, List, Optional
 from typing_extensions import TypedDict
@@ -19,6 +20,8 @@ from app.utils import (
     validate_binary_state
 )
 from app.services.realtime import publish_event
+
+logger = logging.getLogger(__name__)
 
 class Order(TypedDict):
     order_id: str
@@ -82,16 +85,20 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
     
     if is_buy:
         if order_type == 'LIMIT':
-            # For limit orders, user pays exactly their limit price + fees
-            trading_cost = size * limit_price
-            # Estimate trading fee based on limit price (conservative)
-            est_trading_fee = params['f_match'] * size * limit_price / Decimal('2')
-            total_cost = trading_cost + est_trading_fee + gas_fee
+            # CRITICAL FIX: For limit orders, commit collateral (size * limit_price) + gas fee per TDD Section 4.1
+            # This replaces the previous estimation-based validation with actual collateral commitment
+            commit_amount = size * limit_price
+            total_required = commit_amount + gas_fee
             
-            if user_balance < total_cost:
-                raise ValueError(f"Insufficient balance. Required: {total_cost:.4f} USDC, Available: {user_balance:.4f} USDC")
+            if user_balance < total_required:
+                raise ValueError(f"Insufficient balance for limit order commitment. Required: {total_required:.4f} USDC (collateral + gas), Available: {user_balance:.4f} USDC")
+            
+            # Deduct committed amount + gas fee immediately
+            final_balance = float(user_balance - total_required)
+            update_user_balance(user_id, final_balance)
+            logger.info(f"Committed {commit_amount:.4f} USDC collateral + {gas_fee:.4f} USDC gas fee for limit buy order")
         else:
-            # For market orders, estimate cost with slippage
+            # CRITICAL FIX: For market buy orders, validate and deduct gas fee immediately
             current_p = Decimal(get_p_yes(binary) if yes_no == 'YES' else get_p_no(binary))
             try:
                 if yes_no == 'YES':
@@ -106,14 +113,40 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
             except Exception as e:
                 # Fallback to simple validation if AMM math fails
                 validate_balance_buy(user_balance, size, current_p, gas_fee)
+            
+            # Deduct gas fee immediately (actual trading cost deducted later by batch runner)
+            if user_balance < gas_fee:
+                raise ValueError(f"Insufficient balance for gas fee. Required: {gas_fee:.4f} USDC")
+            new_balance = float(user_balance - gas_fee)
+            update_user_balance(user_id, new_balance)
+            logger.info(f"Deducted {gas_fee:.4f} USDC gas fee for market buy order")
     else:
-        # For sell orders, validate token holdings
+        # For sell orders, validate token holdings and handle collateral commitment
         user_tokens = Decimal(fetch_user_position(user_id, outcome_i, yes_no))
         validate_balance_sell(user_tokens, size)
-
-    # Deduct gas_fee regardless of later rejection
-    new_balance = float(user_balance - gas_fee)
-    update_user_balance(user_id, new_balance)
+        
+        if order_type == 'LIMIT':
+            # CRITICAL FIX: For limit sell orders, commit tokens + deduct gas fee per TDD Section 4.1
+            if user_tokens < size:
+                raise ValueError(f"Insufficient tokens for limit sell commitment. Required: {size} tokens, Available: {user_tokens} tokens")
+            if user_balance < gas_fee:
+                raise ValueError(f"Insufficient balance for gas fee. Required: {gas_fee:.4f} USDC")
+            
+            # Deduct gas fee from balance
+            new_balance = float(user_balance - gas_fee)
+            update_user_balance(user_id, new_balance)
+            
+            # Deduct committed tokens from position
+            from app.services.positions import update_user_position
+            update_user_position(user_id, outcome_i, yes_no, -float(size))
+            logger.info(f"Committed {size} {yes_no} tokens + {gas_fee:.4f} USDC gas fee for limit sell order")
+        else:
+            # For market sell orders: only deduct gas fee
+            if user_balance < gas_fee:
+                raise ValueError(f"Insufficient balance for gas fee. Required: {gas_fee:.4f} USDC")
+            new_balance = float(user_balance - gas_fee)
+            update_user_balance(user_id, new_balance)
+            logger.info(f"Deducted {gas_fee:.4f} USDC gas fee for market sell order")
 
     order: Order = {
         'user_id': user_id,
@@ -259,19 +292,59 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
         fills, new_state, _ = apply_orders(sim_state, [sim_order], params, current_time)
         
         if not fills:
-            # No fills possible - likely insufficient liquidity or invalid order
-            return {
-                'estimated_slippage': Decimal('0'), 
-                'would_reject': True, 
-                'est_cost': Decimal('0'),
-                'breakdown': {
-                    'lob_fill': Decimal('0'),
-                    'amm_fill': Decimal('0'),
-                    'total_fee': Decimal('0'),
-                    'effective_price': current_p
-                },
-                'error': 'No liquidity available'
-            }
+            # CRITICAL FIX: No fills possible - provide proper fallback estimation
+            # Per TDD "no rejections" principle, estimate using pure AMM cost
+            try:
+                from app.engine.amm_math import buy_cost_yes, buy_cost_no, sell_received_yes, sell_received_no
+                if is_buy:
+                    if yes_no == 'YES':
+                        fallback_cost = buy_cost_yes(binary, size, params)
+                    else:
+                        fallback_cost = buy_cost_no(binary, size, params)
+                else:
+                    if yes_no == 'YES':
+                        fallback_cost = sell_received_yes(binary, size, params)
+                    else:
+                        fallback_cost = sell_received_no(binary, size, params)
+                
+                # Add gas fee and calculate slippage from AMM price
+                gas_fee = Decimal(str(params.get('gas_fee', 0)))
+                total_cost = fallback_cost + gas_fee
+                fallback_price = safe_divide(fallback_cost, size) if size > 0 else current_p
+                fallback_slippage = safe_divide(abs(fallback_price - current_p), current_p)
+                
+                return {
+                    'estimated_slippage': float(fallback_slippage), 
+                    'would_reject': max_slippage is not None and fallback_slippage > Decimal(str(max_slippage)), 
+                    'est_cost': float(fallback_cost),
+                    'total_est_cost': float(total_cost),
+                    'gas_fee': float(gas_fee),
+                    'breakdown': {
+                        'lob_fill': Decimal('0'),
+                        'amm_fill': size,
+                        'total_fee': Decimal('0'),
+                        'effective_price': fallback_price,
+                        'filled_amount': size
+                    },
+                    'fallback_mode': True
+                }
+            except Exception:
+                # Ultimate fallback - return safe defaults
+                return {
+                    'estimated_slippage': float(Decimal('0.1')),  # 10% conservative estimate
+                    'would_reject': True, 
+                    'est_cost': float(size * current_p),
+                    'total_est_cost': float(size * current_p + Decimal(str(params.get('gas_fee', 0)))),
+                    'gas_fee': float(params.get('gas_fee', 0)),
+                    'breakdown': {
+                        'lob_fill': Decimal('0'),
+                        'amm_fill': Decimal('0'),
+                        'total_fee': Decimal('0'),
+                        'effective_price': current_p,
+                        'filled_amount': Decimal('0')
+                    },
+                    'error': 'Estimation failed - using conservative fallback'
+                }
         
         # Calculate weighted average execution price and total cost
         total_filled = Decimal('0')
@@ -306,8 +379,10 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
             else:
                 slippage = safe_divide(current_p - effective_price, current_p)
         
-        # Check if order would be rejected due to slippage (include equality per TDD)
-        would_reject = max_slippage is not None and slippage >= Decimal(str(max_slippage))
+        # CRITICAL FIX: Check if order would be rejected due to slippage
+        # Per TDD Section 4.2: Use strict inequality (>) for rejection, not (>=)
+        # This prevents rejection at exactly max_slippage boundary
+        would_reject = max_slippage is not None and slippage > Decimal(str(max_slippage))
         
         # Calculate total estimated cost including fees
         est_total_cost = total_cost + total_fee

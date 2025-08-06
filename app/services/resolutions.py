@@ -46,9 +46,70 @@ def apply_payouts(payouts: Dict[str, Decimal], eliminated_outcomes: List[int] = 
             queries.append(f"UPDATE positions SET tokens = 0 WHERE outcome_i = {outcome_i} AND yes_no = 'YES'")
             queries.append(f"UPDATE positions SET tokens = 0 WHERE outcome_i = {outcome_i} AND yes_no = 'NO'")
     
-    # CRITICAL FIX: Pro-rata distribution of unfilled LOB limit orders on final resolution
-    # This implements the TDD requirement: "Final res distributes unfilled limits pro-rata"
-    if is_final:
+    # CRITICAL FIX: Pro-rata distribution of unfilled LOB limit orders
+    # For intermediate resolutions: return unfilled limits on eliminated outcomes (TDD Section 6)
+    # For final resolution: distribute all remaining unfilled limits pro-rata
+    if eliminated_outcomes and not is_final:
+        # INTERMEDIATE RESOLUTION: Return unfilled limits on eliminated outcomes only
+        try:
+            state = fetch_engine_state()
+            binaries = state.get('binaries', [])
+            
+            # Process only eliminated outcomes
+            for outcome_i in eliminated_outcomes:
+                binary = next((b for b in binaries if b['outcome_i'] == outcome_i), None)
+                if not binary or 'lob_pools' not in binary:
+                    continue
+                    
+                lob_pools = binary['lob_pools']
+                
+                # Process YES and NO pools for this eliminated outcome
+                for yes_no in ['YES', 'NO']:
+                    if yes_no not in lob_pools:
+                        continue
+                    token_pools = lob_pools[yes_no]
+                    if not isinstance(token_pools, dict):
+                        continue
+                        
+                    # Process buy and sell pools separately
+                    for is_buy_str in ['buy', 'sell']:
+                        if is_buy_str not in token_pools:
+                            continue
+                        pools = token_pools[is_buy_str]
+                        if not isinstance(pools, dict):
+                            continue
+                            
+                        # Process each price tick pool
+                        for tick_key, pool in pools.items():
+                            if not isinstance(pool, dict) or not pool.get('shares'):
+                                continue
+                                
+                            shares = pool.get('shares', {})
+                            total_volume = Decimal(str(pool.get('volume', 0)))
+                            
+                            if total_volume <= 0 or not shares:
+                                continue
+                                
+                            # Calculate pro-rata returns for each user in the pool
+                            total_shares = sum(Decimal(str(share)) for share in shares.values())
+                            if total_shares <= 0:
+                                continue
+                                
+                            for user_id, user_shares in shares.items():
+                                if user_shares <= 0:
+                                    continue
+                                    
+                                user_shares_decimal = Decimal(str(user_shares))
+                                user_return = usdc_amount((user_shares_decimal / total_shares) * total_volume)
+                                payouts[user_id] = payouts.get(user_id, Decimal('0')) + user_return
+                                
+                            logger.info(f"Intermediate resolution: Distributed {total_volume:.4f} from eliminated outcome {outcome_i} {yes_no} {is_buy_str} pool")
+                            
+        except Exception as e:
+            logger.error(f"Error processing intermediate LOB returns: {e}")
+            # Continue with other payout processing
+    
+    elif is_final:
         try:
             state = fetch_engine_state()
             binaries = state.get('binaries', [])
@@ -197,8 +258,10 @@ def trigger_resolution_service(is_final: bool, elim_outcomes: Union[List[int], i
     # Load state
     state: EngineState = fetch_engine_state()
     
-    # Validate state has active outcomes
+    # Validate state
     active_outcomes = get_active_outcomes(state)
+    
+    # Validate state has active outcomes
     if len(active_outcomes) == 0:
         raise ValueError("No active outcomes found in state")
     
@@ -211,14 +274,26 @@ def trigger_resolution_service(is_final: bool, elim_outcomes: Union[List[int], i
         if len(remaining_after_elim) != len(active_outcomes) - 1:
             raise ValueError("Final resolution should eliminate all but one outcome")
     
-    # For intermediate resolution, validate elimination list
+    # CRITICAL FIX: Enhanced validation for intermediate and final resolutions per TDD Section 6
     if not is_final:
+        # For intermediate resolutions, validate elimination list
+        if not isinstance(elim_outcomes, list):
+            raise ValueError("Intermediate resolution must provide list of outcomes to eliminate")
+        if len(elim_outcomes) == 0:
+            raise ValueError("Intermediate resolution must eliminate at least one outcome")
         if not all(outcome in active_outcomes for outcome in elim_outcomes):
             invalid_outcomes = [o for o in elim_outcomes if o not in active_outcomes]
             raise ValueError(f"Cannot eliminate inactive outcomes: {invalid_outcomes}")
         remaining_after_elim = [o for o in active_outcomes if o not in elim_outcomes]
         if len(remaining_after_elim) < 1:
-            raise ValueError("Intermediate resolution cannot eliminate all outcomes")
+            raise ValueError(f"Intermediate resolution cannot eliminate all outcomes. Active: {active_outcomes}, Eliminating: {elim_outcomes}")
+    else:
+        # For final resolution, validate winner is active
+        if not isinstance(elim_outcomes, int):
+            raise ValueError("Final resolution must provide single winner outcome")
+        winner = elim_outcomes
+        if winner not in active_outcomes:
+            raise ValueError(f"Final resolution winner {winner} must be an active outcome. Active: {active_outcomes}")
     
     # Call engine trigger_resolution
     payouts, updated_state, events = trigger_resolution(state, params, is_final, elim_outcomes)
@@ -263,5 +338,29 @@ def trigger_resolution_service(is_final: bool, elim_outcomes: Union[List[int], i
     new_status = 'RESOLVED' if is_final else 'RUNNING'
     update_config({'status': new_status})
     
-    # Publish realtime update
+    # CRITICAL FIX: Real-time portfolio updates after resolution
+    # Per Implementation Plan Section 5.3: "Real-time updates via Supabase Realtime"
+    # Trigger portfolio cache invalidation for all users to show updated balances/positions
+    try:
+        from app.db.queries import publish_event
+        
+        # Publish portfolio update event to trigger cache invalidation
+        # This ensures all user UIs refresh their portfolio data immediately
+        portfolio_update_payload = {
+            'event_type': 'RESOLUTION_COMPLETE',
+            'is_final': is_final,
+            'eliminated_outcomes': eliminated_list,
+            'timestamp': get_current_ms()
+        }
+        
+        # Use existing publish_event function for real-time updates
+        publish_event('demo', 'PORTFOLIO_UPDATE', portfolio_update_payload)
+        
+        logger.info(f"Published real-time portfolio update for resolution: final={is_final}, eliminated={eliminated_list}")
+        
+    except Exception as e:
+        # Don't fail resolution if portfolio update fails, but log the issue
+        logger.warning(f"Failed to publish real-time portfolio update: {e}")
+    
+    # Publish standard resolution update
     publish_resolution_update(is_final, elim_outcomes)
