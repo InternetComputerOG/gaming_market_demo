@@ -17,6 +17,15 @@ import uuid  # For generating unique IDs
 # Test configuration assumptions (to address Issue #5)
 # Assumes default demo config: cm_enabled=True, af_enabled=True, n_outcomes>=2, starting_balance sufficient for test sizes.
 TEST_OUTCOMES = 3  # Assume at least 3 outcomes
+OUTCOME_NAMES = ["Outcome A", "Outcome B", "Outcome C"]  # Match config.py outcome_names
+
+# Helper function to get outcome name by index
+def get_outcome_name(outcome_index):
+    """Convert 0-based outcome index to actual outcome name"""
+    if outcome_index < len(OUTCOME_NAMES):
+        return OUTCOME_NAMES[outcome_index]
+    else:
+        return f"Outcome {outcome_index + 1}"
 
 # Environment detection and validation
 is_wsl = 'microsoft' in platform.uname().release.lower()
@@ -299,12 +308,13 @@ def get_yes_price(driver, wait, outcome):
         
         # First navigate to the correct outcome tab
         outcome_tabs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'button[data-testid="stTab"]')))
+        target_outcome_name = get_outcome_name(outcome - 1)  # Convert 1-based to 0-based index
         for tab in outcome_tabs:
             try:
                 tab_text = tab.find_element(By.CSS_SELECTOR, '[data-testid="stMarkdownContainer"] p').text
-                if f"Outcome {outcome}" in tab_text:
+                if target_outcome_name in tab_text:
                     driver.execute_script("arguments[0].click();", tab)
-                    print(f"✓ Navigated to Outcome {outcome} tab")
+                    print(f"✓ Navigated to {target_outcome_name} tab")
                     time.sleep(1)
                     break
             except:
@@ -344,12 +354,13 @@ def get_no_price(driver, wait, outcome):
         
         # First navigate to the correct outcome tab
         outcome_tabs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'button[data-testid="stTab"]')))
+        target_outcome_name = get_outcome_name(outcome - 1)  # Convert 1-based to 0-based index
         for tab in outcome_tabs:
             try:
                 tab_text = tab.find_element(By.CSS_SELECTOR, '[data-testid="stMarkdownContainer"] p').text
-                if f"Outcome {outcome}" in tab_text:
+                if target_outcome_name in tab_text:
                     driver.execute_script("arguments[0].click();", tab)
-                    print(f"✓ Navigated to Outcome {outcome} tab")
+                    print(f"✓ Navigated to {target_outcome_name} tab")
                     time.sleep(1)
                     break
             except:
@@ -397,18 +408,20 @@ def place_market_order(driver, wait, outcome, yes_no, buy_sell, size):
         
         # Select outcome tab using button with data-testid="stTab" and text matching
         outcome_tabs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'button[data-testid="stTab"]')))
+        target_outcome_name = get_outcome_name(outcome - 1)  # Convert 1-based to 0-based index
         for tab in outcome_tabs:
             try:
                 tab_text = tab.find_element(By.CSS_SELECTOR, '[data-testid="stMarkdownContainer"] p').text
-                if f"Outcome {outcome}" in tab_text:
+                if target_outcome_name in tab_text:
                     driver.execute_script("arguments[0].click();", tab)
-                    print(f"✅ Selected Outcome {outcome} tab")
+                    print(f"✅ Selected {target_outcome_name} tab")
                     time.sleep(1)
                     break
             except:
                 continue
         else:
-            raise Exception(f"Could not find Outcome {outcome} tab")
+            target_outcome_name = get_outcome_name(outcome - 1)  # Convert 1-based to 0-based index
+            raise Exception(f"Could not find {target_outcome_name} tab")
         
         # Select YES/NO using label[data-baseweb="radio"] with text matching
         yes_no_container = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, f'.st-key-yes-no-radio-{outcome-1}')))
@@ -507,15 +520,15 @@ def place_limit_order(driver, wait, outcome, yes_no, buy_sell, size, price, af_o
         outcome_tabs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, '[data-testid="stTab"]')))
         outcome_tab = None
         for tab in outcome_tabs:
-            if f"Outcome {outcome + 1}" in tab.text:
+            if get_outcome_name(outcome) in tab.text:
                 outcome_tab = tab
                 break
         
         if outcome_tab:
             outcome_tab.click()
-            print(f"✅ Selected Outcome {outcome + 1} tab")
+            print(f"✅ Selected {get_outcome_name(outcome)} tab")
         else:
-            raise Exception(f"Could not find Outcome {outcome + 1} tab")
+            raise Exception(f"Could not find {get_outcome_name(outcome)} tab")
         
         # Wait for tab content to load
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="stRadio"]')))
@@ -751,15 +764,15 @@ def place_limit_order(driver, wait, outcome, yes_no, buy_sell, size, price, af_o
         outcome_tabs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, '[data-testid="stTab"]')))
         outcome_tab = None
         for tab in outcome_tabs:
-            if f"Outcome {outcome + 1}" in tab.text:
+            if get_outcome_name(outcome) in tab.text:
                 outcome_tab = tab
                 break
         
         if outcome_tab:
             outcome_tab.click()
-            print(f"✅ Selected Outcome {outcome + 1} tab")
+            print(f"✅ Selected {get_outcome_name(outcome)} tab")
         else:
-            raise Exception(f"Could not find Outcome {outcome + 1} tab")
+            raise Exception(f"Could not find {get_outcome_name(outcome)} tab")
         
         # Wait for tab content to load
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="stRadio"]')))
@@ -1081,15 +1094,17 @@ def cancel_order(driver, wait, outcome, yes_no):
         for tab in outcome_tabs:
             try:
                 tab_text = tab.find_element(By.CSS_SELECTOR, '[data-testid="stMarkdownContainer"] p').text
-                if f"Outcome {outcome}" in tab_text:
+                target_outcome_name = get_outcome_name(outcome - 1)  # Convert 1-based to 0-based index
+                if target_outcome_name in tab_text:
                     driver.execute_script("arguments[0].click();", tab)
-                    print(f"✅ Selected Outcome {outcome} tab in Portfolio")
+                    print(f"✅ Selected {target_outcome_name} tab in Portfolio")
                     time.sleep(2)
                     break
             except:
                 continue
         else:
-            raise Exception(f"Could not find Outcome {outcome} tab in Portfolio")
+            target_outcome_name = get_outcome_name(outcome - 1)  # Convert 1-based to 0-based index
+            raise Exception(f"Could not find {target_outcome_name} tab in Portfolio")
         
         # Find and click the order to expand it (using class-based selector)
         print(f"🔍 Looking for {yes_no} order to cancel...")

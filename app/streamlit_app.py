@@ -63,6 +63,48 @@ if 'last_leaderboard_update' not in st.session_state:
 batch_interval_ms = params.get('batch_interval_ms', 5000)
 batch_interval_s = batch_interval_ms / 1000.0
 
+# Fragment for current market prices - must be defined at module scope
+@st.fragment(run_every=batch_interval_s)
+def price_fragment(outcome_i):
+    try:
+        current_p_yes, current_p_no = get_current_prices(outcome_i)
+        
+        # Display current market prices
+        price_col1, price_col2 = st.columns(2)
+        with price_col1:
+            st.metric("YES Market Price", f"${current_p_yes:.4f}", delta=None)
+        with price_col2:
+            st.metric("NO Market Price", f"${current_p_no:.4f}", delta=None)
+        
+        # Spread calculation
+        spread = abs(current_p_yes - current_p_no)
+        st.markdown(f"**Spread:** ${spread:.4f}")
+        
+        return current_p_yes, current_p_no
+    except Exception as e:
+        st.warning("Could not load current market prices")
+        return None, None
+
+# Fragment for portfolio data - updates at batch interval
+@st.fragment(run_every=batch_interval_s)
+def portfolio_fragment(user_id):
+    try:
+        positions = fetch_user_positions(user_id)
+        orders = get_user_orders(user_id, 'OPEN')
+        return {
+            'success': True,
+            'positions': positions,
+            'orders': orders,
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'positions': [],
+            'orders': [],
+            'error': str(e)
+        }
+
 # Helper function for getting current prices (used by price fragment)
 def get_current_prices(outcome_i):
     """Get current YES and NO prices for an outcome"""
@@ -219,98 +261,33 @@ else:
             else:
                 return f"{mins:02d}:{secs:02d}"
         
-        # Display countdown with progress bar
-        progress = min(1.0, elapsed_ms / total_duration_ms) if total_duration_ms > 0 else 0
-        
-        # Client-side countdown timer using config parameters (no external state needed)
-        countdown_js = f"""
-        <script>
-        (function() {{
-            // Calculate initial time remaining based on config
-            const startTime = {start_ms};
-            const totalDuration = {total_duration_ms};
-            const currentTime = Date.now();
+        # Fragment-based countdown timer - updates every second
+        @st.fragment(run_every=1.0)  # Update every 1 second
+        def countdown_fragment():
+            # Recalculate current time for accurate countdown
+            current_ms_live = get_current_ms()
+            elapsed_ms_live = current_ms_live - start_ms
+            time_to_end_live = max(0, (total_duration_ms - elapsed_ms_live) / 1000)
+            progress_live = min(1.0, elapsed_ms_live / total_duration_ms) if total_duration_ms > 0 else 0
             
-            let timeRemaining = Math.max(0, (startTime + totalDuration - currentTime) / 1000);
-            
-            function updateCountdown() {{
-                if (timeRemaining <= 0) {{
-                    // Timer finished - could trigger completion event
-                    document.body.setAttribute('data-timer-finished', 'true');
-                    return;
-                }}
-                
-                timeRemaining -= 1;
-                const elapsed = (totalDuration / 1000) - timeRemaining;
-                const progress = elapsed / (totalDuration / 1000);
-                
-                // Format time function
-                function formatTime(seconds) {{
-                    const mins = Math.floor(seconds / 60);
-                    const secs = Math.floor(seconds % 60);
-                    const hours = Math.floor(mins / 60);
-                    const displayMins = mins % 60;
-                    
-                    if (hours > 0) {{
-                        return hours.toString().padStart(2, '0') + ':' + 
-                               displayMins.toString().padStart(2, '0') + ':' + 
-                               secs.toString().padStart(2, '0');
-                    }} else {{
-                        return displayMins.toString().padStart(2, '0') + ':' + 
-                               secs.toString().padStart(2, '0');
-                    }}
-                }}
-                
-                // Update countdown display in the parent window (outside iframe)
-                try {{
-                    const message = {{
-                        type: 'countdown_update',
-                        timeRemaining: formatTime(timeRemaining),
-                        elapsed: formatTime(elapsed),
-                        progress: progress
-                    }};
-                    window.parent.postMessage(message, '*');
-                }} catch (e) {{
-                    // Fallback: update within iframe if cross-origin issues
-                    console.log('Countdown update:', formatTime(timeRemaining));
-                }}
-            }}
-            
-            // Update immediately, then every second
-            updateCountdown();
-            setInterval(updateCountdown, 1000);
-            
-            console.log('Client-side countdown timer initialized');
-        }})();
-        </script>
-        """
-        
-        # Create countdown display containers that can be updated
-        countdown_container = st.empty()
-        progress_container = st.empty()
-        
-        with countdown_container.container():
+            # Display countdown with live updates
             col1, col2 = st.columns([3, 1])
             with col1:
-                st.metric("Time Remaining", format_time(time_to_end), key="countdown-remaining")
+                st.metric("Time Remaining", format_time(time_to_end_live))
                 if total_duration_ms > 0:
-                    st.progress(progress, text=f"Progress: {int(progress * 100)}%")
+                    st.progress(progress_live, text=f"Progress: {int(progress_live * 100)}%")
             with col2:
-                st.metric("Elapsed", format_time(elapsed_ms / 1000), key="countdown-elapsed")
+                st.metric("Elapsed", format_time(elapsed_ms_live / 1000))
+            
+            return time_to_end_live, progress_live
         
-        # Inject the countdown JavaScript
-        st.components.v1.html(countdown_js, height=0)
+        # Call the countdown fragment for live updates
+        time_remaining, current_progress = countdown_fragment()
     else:
         st.metric("Time to End", "Duration not configured")
 
-# Replace st.experimental_rerun() with st.rerun() in the tick check block
-# Original lines (approximate, based on code structure around the if time.time() - st.session_state['last_check'] > 1 block):
-if time.time() - st.session_state['last_check'] > 1:
-    st.session_state['last_check'] = time.time()
-    current_tick = get_current_tick()
-    if current_tick and current_tick['tick_id'] > st.session_state['last_tick']:
-        st.session_state['last_tick'] = current_tick['tick_id']
-        st.rerun()  # Changed from st.experimental_rerun()
+# Legacy polling mechanism removed - fragments handle all realtime updates now
+# No need for manual st.rerun() calls as fragments update automatically
 
 # Fragment for user balance - updates at batch interval
 @st.fragment(run_every=batch_interval_s)
@@ -325,8 +302,6 @@ def balance_fragment():
 
 balance = balance_fragment()
 
-st.sidebar.header("Leaderboard")
-
 # Fragment for leaderboard - updates at 2x batch interval (less frequent)
 @st.fragment(run_every=batch_interval_s * 2)
 def leaderboard_fragment():
@@ -334,21 +309,41 @@ def leaderboard_fragment():
         users = client.table('users').select('*').execute().data
         leaderboard = sorted(users, key=lambda u: float(u['balance']) + float(u['net_pnl']), reverse=True)[:5]
         
-        for rank, user in enumerate(leaderboard, 1):
+        # Return data instead of writing to sidebar directly
+        return {
+            'success': True,
+            'leaderboard': leaderboard,
+            'user_count': len(users),
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'leaderboard': [],
+            'user_count': 0,
+            'error': str(e)
+        }
+
+# Call fragment within sidebar context
+with st.sidebar:
+    st.header("Leaderboard")
+    
+    leaderboard_data = leaderboard_fragment()
+    
+    if leaderboard_data['success']:
+        for rank, user in enumerate(leaderboard_data['leaderboard'], 1):
             total_value = float(user['balance']) + float(user['net_pnl'])
-            st.sidebar.write(f"{rank}. {user['display_name']}: ${total_value:.2f}")
+            st.write(f"{rank}. {user['display_name']}: ${total_value:.2f}")
         
         # Display user count
-        st.sidebar.markdown(f'👥 **{len(users)} players online**')
-        
-        return len(users)
-    except Exception as e:
-        st.sidebar.warning(f"Could not load leaderboard: {str(e)}")
-        return 0
+        st.markdown(f'👥 **{leaderboard_data["user_count"]} players online**')
+        user_count = leaderboard_data['user_count']
+    else:
+        st.warning(f"Could not load leaderboard: {leaderboard_data['error']}")
+        user_count = 0
 
-user_count = leaderboard_fragment()
-
-outcome_tabs = st.tabs([f"Outcome {i+1}" for i in range(params['n_outcomes'])])
+# Use actual outcome names from config instead of generic "Outcome 1", "Outcome 2"
+outcome_tabs = st.tabs([params['outcome_names'][i] if i < len(params['outcome_names']) else f"Outcome {i+1}" for i in range(params['n_outcomes'])])
 
 for outcome_i, tab in enumerate(outcome_tabs):
     with tab:
@@ -502,29 +497,8 @@ for outcome_i, tab in enumerate(outcome_tabs):
         with col2:
             st.header("📊 Order Book")
             
-            # Fragment for current market prices - updates at batch interval
-            @st.fragment(run_every=batch_interval_s)
-            def price_fragment():
-                try:
-                    current_p_yes, current_p_no = get_current_prices(outcome_i)
-                    
-                    # Display current market prices
-                    price_col1, price_col2 = st.columns(2)
-                    with price_col1:
-                        st.metric("YES Market Price", f"${current_p_yes:.4f}", delta=None)
-                    with price_col2:
-                        st.metric("NO Market Price", f"${current_p_no:.4f}", delta=None)
-                    
-                    # Spread calculation
-                    spread = abs(current_p_yes - current_p_no)
-                    st.markdown(f"**Spread:** ${spread:.4f}")
-                    
-                    return current_p_yes, current_p_no
-                except Exception as e:
-                    st.warning("Could not load current market prices")
-                    return None, None
-            
-            current_p_yes, current_p_no = price_fragment()
+            # Use module-scope price fragment for live updates
+            current_p_yes, current_p_no = price_fragment(outcome_i)
             
             # Enhanced order book aggregation with user position tracking
             pools: List[Dict[str, Any]] = fetch_pools(outcome_i)
@@ -661,40 +635,7 @@ for outcome_i, tab in enumerate(outcome_tabs):
             if total_user_positions > 0:
                 st.info(f"👤 **You have positions in {total_user_positions} LOB pools** - Look for the 👤 indicator above")
 
-        st.header("Recent Trades")
-        
-        # Get trades with realtime updates
-        try:
-            # Check if we have realtime trades for this outcome
-            outcome_trades = [t for t in st.session_state['realtime_trades'] if t.get('outcome_i') == outcome_i]
-            
-            if outcome_trades:
-                # Use realtime trades data
-                trades_data = outcome_trades[:10]  # Latest 10 trades
-            else:
-                # Fallback to static fetch and store in realtime cache
-                trades = client.table('trades').select('*').eq('outcome_i', outcome_i).order('ts_ms', desc=True).limit(10).execute().data
-                trades_data = trades
-                # Store in realtime cache
-                st.session_state['realtime_trades'].extend(trades)
-                # Keep only latest 50 trades to prevent memory bloat
-                st.session_state['realtime_trades'] = st.session_state['realtime_trades'][-50:]
-            
-            # Display trades with realtime attributes
-            if trades_data:
-                st.markdown(f'<div data-realtime="trades" data-outcome="{outcome_i}">', unsafe_allow_html=True)
-                st.table([{ 
-                    'Price': f"${float(t['price']):.4f}", 
-                    'Size': f"{float(t['size']):.2f}", 
-                    'Side': t['yes_no'],
-                    'Time': f"{t.get('ts_ms', 0) // 1000}s ago" if 'ts_ms' in t else "Recent"
-                } for t in trades_data])
-                st.markdown('</div>', unsafe_allow_html=True)
-            else:
-                st.info("No recent trades for this outcome")
-                
-        except Exception as e:
-            st.warning(f"Could not load recent trades: {str(e)}")
+        # Recent Trades section moved to bottom of page
 
 # Enhanced Position and Order Management
 st.header("💼 Your Portfolio")
@@ -705,17 +646,13 @@ pos_tab1, pos_tab2, pos_tab3 = st.tabs(["🏆 Filled Positions", "⏳ Open Limit
 with pos_tab1:
     st.subheader("🏆 Your Filled Positions")
     
-    # Get positions with realtime updates
-    try:
-        # Check if we have realtime positions
-        if st.session_state['realtime_user_positions']:
-            positions = st.session_state['realtime_user_positions']
-        else:
-            # Fallback to static fetch and store in realtime cache
-            positions = fetch_user_positions(user_id)
-            st.session_state['realtime_user_positions'] = positions
-    except Exception as e:
-        st.warning(f"Could not load positions: {str(e)}")
+    # Get positions using portfolio fragment for live updates
+    portfolio_data = portfolio_fragment(user_id)
+    
+    if portfolio_data['success']:
+        positions = portfolio_data['positions']
+    else:
+        st.warning(f"Could not load positions: {portfolio_data['error']}")
         positions = []
     
     if positions:
@@ -775,17 +712,13 @@ with pos_tab1:
 with pos_tab2:
     st.subheader("⏳ Your Open Limit Orders")
     
-    # Get orders with realtime updates
-    try:
-        # Check if we have realtime orders
-        if st.session_state['realtime_user_orders']:
-            orders = st.session_state['realtime_user_orders']
-        else:
-            # Fallback to static fetch and store in realtime cache
-            orders = get_user_orders(user_id, 'OPEN')
-            st.session_state['realtime_user_orders'] = orders
-    except Exception as e:
-        st.warning(f"Could not load orders: {str(e)}")
+    # Get orders using portfolio fragment for live updates
+    portfolio_data = portfolio_fragment(user_id)
+    
+    if portfolio_data['success']:
+        orders = portfolio_data['orders']
+    else:
+        st.warning(f"Could not load orders: {portfolio_data['error']}")
         orders = []
     
     if orders:
@@ -884,9 +817,16 @@ with pos_tab2:
 with pos_tab3:
     st.subheader("📊 Portfolio Summary")
     
-    # Get both positions and orders for comprehensive summary
-    positions = fetch_user_positions(user_id)
-    orders = get_user_orders(user_id, 'OPEN')
+    # Get both positions and orders using fragment for live updates
+    portfolio_data = portfolio_fragment(user_id)
+    
+    if portfolio_data['success']:
+        positions = portfolio_data['positions']
+        orders = portfolio_data['orders']
+    else:
+        st.warning(f"Could not load portfolio data: {portfolio_data['error']}")
+        positions = []
+        orders = []
     
     summary_col1, summary_col2 = st.columns(2)
     
@@ -894,8 +834,28 @@ with pos_tab3:
         st.write("**📈 Current Holdings**")
         filled_positions = [p for p in positions if float(p['tokens']) > 0]
         if filled_positions:
+            # Group positions by outcome and sum YES/NO holdings
+            outcome_holdings = {}
             for p in filled_positions:
-                st.write(f"• Outcome {p['outcome_i']}: {float(p['tokens']):.2f} {p['yes_no']} tokens")
+                outcome_i = int(p['outcome_i'])
+                outcome_name = params['outcome_names'][outcome_i] if outcome_i < len(params['outcome_names']) else f"Outcome {outcome_i + 1}"
+                
+                if outcome_name not in outcome_holdings:
+                    outcome_holdings[outcome_name] = {'YES': 0.0, 'NO': 0.0}
+                
+                outcome_holdings[outcome_name][p['yes_no']] += float(p['tokens'])
+            
+            # Display summarized holdings
+            for outcome_name, holdings in outcome_holdings.items():
+                yes_tokens = holdings['YES']
+                no_tokens = holdings['NO']
+                
+                if yes_tokens > 0 and no_tokens > 0:
+                    st.write(f"• **{outcome_name}**: {yes_tokens:.2f} YES, {no_tokens:.2f} NO tokens")
+                elif yes_tokens > 0:
+                    st.write(f"• **{outcome_name}**: {yes_tokens:.2f} YES tokens")
+                elif no_tokens > 0:
+                    st.write(f"• **{outcome_name}**: {no_tokens:.2f} NO tokens")
         else:
             st.write("*No current holdings*")
     
@@ -925,12 +885,23 @@ with pos_tab3:
         st.metric("Open Orders", len(orders))
     
     with metric_col3:
-        # Calculate total committed capital in open orders (LIMIT orders only)
-        total_committed = sum(
+        # Calculate total committed capital (open orders + filled positions cost basis)
+        # Capital in open LIMIT orders
+        open_order_capital = sum(
             float(order['remaining']) * float(order['limit_price']) 
             for order in orders 
-            if order['type'] == 'LIMIT' and order['limit_price'] is not None
+            if order['type'] == 'LIMIT' and order['limit_price'] is not None and order['is_buy']
         )
+        
+        # Capital already invested in filled positions (cost basis)
+        # This is an approximation - ideally we'd track actual purchase prices
+        filled_capital = sum(
+            float(p['tokens']) * 0.5  # Assume average cost of $0.50 per token as approximation
+            for p in positions 
+            if float(p['tokens']) > 0
+        )
+        
+        total_committed = open_order_capital + filled_capital
         st.metric("Capital Committed", f"${total_committed:.2f}")
     
     with metric_col4:
@@ -945,5 +916,113 @@ with pos_tab3:
     # Placeholder for Gas Spent (assume fetched or 0)
     st.metric("Gas Spent", "$0.00")
 
-if st.button("Refresh", key="refresh-button"):
-    st.rerun()
+# Recent Trades Section - moved to bottom of page
+st.header("📈 Recent Trades")
+st.write("Latest trades across all outcomes")
+
+# Fragment for recent trades - updates at batch interval
+@st.fragment(run_every=batch_interval_s)
+def recent_trades_fragment():
+    try:
+        # Get all recent trades across all outcomes
+        # Note: trades table has both buy_user_id and sell_user_id, so we need to handle this differently
+        trades = client.table('trades').select('*').order('ts_ms', desc=True).limit(20).execute().data
+        
+        # Get user information separately to avoid ambiguous relationship
+        user_ids = set()
+        for trade in trades:
+            if trade.get('buy_user_id'):
+                user_ids.add(trade['buy_user_id'])
+            if trade.get('sell_user_id'):
+                user_ids.add(trade['sell_user_id'])
+        
+        # Fetch user display names
+        users_data = {}
+        if user_ids:
+            users = client.table('users').select('user_id, display_name').in_('user_id', list(user_ids)).execute().data
+            users_data = {u['user_id']: u['display_name'] for u in users}
+        
+        return {
+            'success': True,
+            'trades': trades,
+            'users_data': users_data,
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'trades': [],
+            'users_data': {},
+            'error': str(e)
+        }
+
+# Get recent trades using fragment for live updates
+trades_data = recent_trades_fragment()
+
+if trades_data['success'] and trades_data['trades']:
+    # Process trades data with requested modifications
+    processed_trades = []
+    users_data = trades_data.get('users_data', {})
+    
+    # System user IDs (from app/engine/lob_matching.py and app/engine/orders.py)
+    SYSTEM_USER_IDS = {
+        '00000000-0000-0000-0000-000000000000',  # AMM System
+        '11111111-1111-1111-1111-111111111111',  # Limit YES Pool
+        '22222222-2222-2222-2222-222222222222',  # Limit NO Pool
+        '33333333-3333-3333-3333-333333333333',  # Limit Pool
+        '44444444-4444-4444-4444-444444444444',  # Market User
+    }
+    
+    for t in trades_data['trades']:
+        # Get user display name by identifying which side is NOT a system user
+        user_name = "Unknown"
+        is_user_buy = False
+        
+        buy_user_id = t.get('buy_user_id')
+        sell_user_id = t.get('sell_user_id')
+        
+        if sell_user_id in SYSTEM_USER_IDS:
+            # Seller is a system user, so buyer is the actual user (user initiated a buy)
+            if buy_user_id and buy_user_id in users_data:
+                user_name = users_data[buy_user_id]
+            is_user_buy = True
+        elif buy_user_id in SYSTEM_USER_IDS:
+            # Buyer is a system user, so seller is the actual user (user initiated a sell)
+            if sell_user_id and sell_user_id in users_data:
+                user_name = users_data[sell_user_id]
+            is_user_buy = False
+        else:
+            # Neither is a system user - this is a user-to-user trade
+            # Show the buyer as the "active" user for consistency
+            if buy_user_id and buy_user_id in users_data:
+                user_name = users_data[buy_user_id]
+            is_user_buy = True
+        
+        # Add directionality to size (negative for sells)
+        size = float(t['size'])
+        if is_user_buy:
+            size_display = f"{size:.2f}"  # Positive for buys
+        else:
+            size_display = f"-{size:.2f}"  # Negative for sells
+        
+        # Get outcome name
+        outcome_i = int(t.get('outcome_i', 0))
+        outcome_name = params['outcome_names'][outcome_i] if outcome_i < len(params['outcome_names']) else f"Outcome {outcome_i + 1}"
+        
+        processed_trades.append({
+            'Outcome': outcome_name,
+            'User': user_name,
+            'Price': f"${float(t['price']):.4f}",
+            'Size': size_display,
+            'Side': t['yes_no']
+        })
+    
+    # Display the trades table
+    st.table(processed_trades)
+else:
+    if trades_data['success']:
+        st.info("No recent trades yet")
+    else:
+        st.warning(f"Could not load recent trades: {trades_data['error']}")
+
+# Legacy refresh button removed - fragments handle all updates automatically
