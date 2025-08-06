@@ -63,72 +63,104 @@ def insert_system_users():
 def reset_demo_state():
     """
     Completely reset the demo state by clearing all relevant database tables
-    and resetting the config to DRAFT status.
+    and resetting the config to DRAFT status with atomic transaction support.
     """
     try:
         client = get_client()
         
-        # Clear all demo-related tables using proper delete syntax
-        # We'll delete all records (no dummy condition needed)
+        # Use atomic transaction approach for better reliability
+        st.info("🔄 Starting atomic demo reset...")
         
-        # 1. Clear users table (joined users list) - most important for user's issue
-        try:
-            # First, check if there are users to delete
-            users_before = client.table('users').select('user_id').execute()
-            if users_before.data:
-                # Delete all users using a more reliable method
-                for user in users_before.data:
-                    try:
-                        client.table('users').delete().eq('user_id', user['user_id']).execute()
-                    except Exception as e:
-                        st.warning(f"Could not delete user {user['user_id']}: {e}")
-                        
-                # Verify deletion worked
-                users_after = client.table('users').select('user_id').execute()
-                if users_after.data:
-                    st.warning(f"Warning: {len(users_after.data)} users still remain after reset")
-                else:
-                    st.success("✅ Users table cleared successfully")
-            else:
-                st.info("Users table was already empty")
-        except Exception as e:
-            st.error(f"Error clearing users table: {e}")
-            
-        # Clear other tables using the same reliable method
+        # Step 1: Collect all records to delete (for verification)
         tables_to_clear = [
+            ('users', 'user_id'),
             ('positions', 'position_id'),
             ('orders', 'order_id'), 
             ('lob_pools', 'pool_id'),
             ('trades', 'trade_id'),
             ('events', 'event_id'),
-            ('metrics', 'metric_id')
+            ('metrics', 'metric_id'),
+            ('ticks', 'tick_id')
         ]
+        
+        initial_counts = {}
+        for table_name, id_field in tables_to_clear:
+            try:
+                count_result = client.table(table_name).select('count', count='exact').execute()
+                initial_counts[table_name] = count_result.count if hasattr(count_result, 'count') else len(count_result.data)
+                st.info(f"📊 {table_name}: {initial_counts[table_name]} records to clear")
+            except Exception as e:
+                st.warning(f"Could not count {table_name}: {e}")
+                initial_counts[table_name] = 0
+        
+        # Step 2: Attempt to clear all tables with better error handling
+        deletion_success = True
+        deletion_errors = []
         
         for table_name, id_field in tables_to_clear:
             try:
-                # Get all records first
-                records = client.table(table_name).select(id_field).execute()
-                if records.data:
-                    # Delete each record individually for reliability
-                    for record in records.data:
-                        try:
-                            client.table(table_name).delete().eq(id_field, record[id_field]).execute()
-                        except:
-                            pass  # Continue with other records
-            except:
-                pass  # Table might not exist or be empty
-                
-        # Special handling for ticks table (numeric ID)
-        try:
-            ticks = client.table('ticks').select('tick_id').execute()
-            if ticks.data:
-                for tick in ticks.data:
+                if initial_counts.get(table_name, 0) > 0:
+                    st.info(f"🗑️ Clearing {table_name}...")
+                    
+                    # Try bulk delete first (more efficient)
                     try:
-                        client.table('ticks').delete().eq('tick_id', tick['tick_id']).execute()
-                    except:
-                        pass
-        except:
-            pass
+                        # Use a condition that matches all records
+                        result = client.table(table_name).delete().neq(id_field, 'impossible-uuid-that-never-exists').execute()
+                        st.success(f"✅ {table_name} cleared via bulk delete")
+                    except Exception as bulk_error:
+                        st.warning(f"Bulk delete failed for {table_name}, trying individual deletion: {bulk_error}")
+                        
+                        # Fallback to individual record deletion
+                        records = client.table(table_name).select(id_field).execute()
+                        if records.data:
+                            failed_deletes = 0
+                            for record in records.data:
+                                try:
+                                    client.table(table_name).delete().eq(id_field, record[id_field]).execute()
+                                except Exception as record_error:
+                                    failed_deletes += 1
+                                    if failed_deletes <= 3:  # Only show first few errors
+                                        st.warning(f"Failed to delete {table_name} record {record[id_field]}: {record_error}")
+                            
+                            if failed_deletes > 0:
+                                st.warning(f"⚠️ {failed_deletes} records in {table_name} could not be deleted")
+                                deletion_success = False
+                                deletion_errors.append(f"{table_name}: {failed_deletes} failed deletions")
+                            else:
+                                st.success(f"✅ {table_name} cleared via individual deletion")
+                else:
+                    st.info(f"ℹ️ {table_name} was already empty")
+                    
+            except Exception as table_error:
+                st.error(f"❌ Error clearing {table_name}: {table_error}")
+                deletion_success = False
+                deletion_errors.append(f"{table_name}: {str(table_error)}")
+        
+        # Step 3: Verify deletion results
+        st.info("🔍 Verifying deletion results...")
+        verification_success = True
+        
+        for table_name, id_field in tables_to_clear:
+            try:
+                remaining_result = client.table(table_name).select('count', count='exact').execute()
+                remaining_count = remaining_result.count if hasattr(remaining_result, 'count') else len(remaining_result.data)
+                
+                if remaining_count > 0:
+                    st.warning(f"⚠️ {table_name} still has {remaining_count} records remaining")
+                    verification_success = False
+                else:
+                    st.success(f"✅ {table_name} successfully cleared (0 records)")
+            except Exception as verify_error:
+                st.warning(f"Could not verify {table_name}: {verify_error}")
+        
+        # Step 4: Report overall deletion status
+        if deletion_success and verification_success:
+            st.success("🎉 All database tables successfully cleared!")
+        elif deletion_success:
+            st.warning("⚠️ Deletion completed but verification found remaining records")
+        else:
+            st.error(f"❌ Deletion encountered errors: {'; '.join(deletion_errors)}")
+            st.info("💡 Some records may remain due to foreign key constraints or permissions")
         
         # 9. Reset config to DRAFT state with default parameters and proper engine state
         default_params = get_default_engine_params()
@@ -448,23 +480,127 @@ def run_admin_app():
                 params['batch_interval_ms'] = st.number_input("Batch Interval (ms)", min_value=100, value=params['batch_interval_ms'])
 
             with col6:
-                res_offsets_str = st.text_input("Resolution Offsets (JSON list)", value=json.dumps(params['res_offsets']))
-                params['res_offsets'] = json.loads(res_offsets_str) if res_offsets_str else []
-                freeze_durs_str = st.text_input("Freeze Durations (JSON list)", value=json.dumps(params['freeze_durs']))
-                params['freeze_durs'] = json.loads(freeze_durs_str) if freeze_durs_str else []
-                elim_outcomes_str = st.text_input("Elim Outcomes (JSON list of lists)", value=json.dumps(params['elim_outcomes']))
-                params['elim_outcomes'] = json.loads(elim_outcomes_str) if elim_outcomes_str else []
+                # Multi-resolution configuration with proper validation
+                try:
+                    res_offsets_str = st.text_input("Resolution Offsets (JSON list)", value=json.dumps(params['res_offsets']))
+                    if res_offsets_str.strip():
+                        parsed_offsets = json.loads(res_offsets_str)
+                        if not isinstance(parsed_offsets, list) or not all(isinstance(x, (int, float)) and x >= 0 for x in parsed_offsets):
+                            st.error("Resolution offsets must be a list of non-negative numbers")
+                            params['res_offsets'] = []
+                        else:
+                            params['res_offsets'] = parsed_offsets
+                    else:
+                        params['res_offsets'] = []
+                except json.JSONDecodeError:
+                    st.error("Invalid JSON format for resolution offsets")
+                    params['res_offsets'] = []
+                
+                try:
+                    freeze_durs_str = st.text_input("Freeze Durations (JSON list)", value=json.dumps(params['freeze_durs']))
+                    if freeze_durs_str.strip():
+                        parsed_freeze = json.loads(freeze_durs_str)
+                        if not isinstance(parsed_freeze, list) or not all(isinstance(x, (int, float)) and x >= 0 for x in parsed_freeze):
+                            st.error("Freeze durations must be a list of non-negative numbers")
+                            params['freeze_durs'] = []
+                        else:
+                            params['freeze_durs'] = parsed_freeze
+                    else:
+                        params['freeze_durs'] = []
+                except json.JSONDecodeError:
+                    st.error("Invalid JSON format for freeze durations")
+                    params['freeze_durs'] = []
+                
+                # Enhanced elim_outcomes validation per TDD requirements
+                try:
+                    elim_outcomes_str = st.text_input("Elim Outcomes (JSON list of lists for multi-res, int for final)", value=json.dumps(params['elim_outcomes']))
+                    if elim_outcomes_str.strip():
+                        parsed_elim = json.loads(elim_outcomes_str)
+                        
+                        # Validate based on multi-resolution mode
+                        if params['mr_enabled']:
+                            # Multi-resolution: must be list[list[int]]
+                            if not isinstance(parsed_elim, list):
+                                st.error("Multi-resolution elim_outcomes must be a list of lists (e.g., [[1], [2]])")
+                                params['elim_outcomes'] = []
+                            elif not all(isinstance(sublist, list) and all(isinstance(i, int) and 0 <= i < params['n_outcomes'] for i in sublist) for sublist in parsed_elim):
+                                st.error("Each elimination round must be a list of valid outcome indices (0 to N-1)")
+                                params['elim_outcomes'] = []
+                            else:
+                                # Validate total eliminations = N-1
+                                total_eliminated = sum(len(round_elims) for round_elims in parsed_elim)
+                                if total_eliminated != params['n_outcomes'] - 1:
+                                    st.error(f"Total eliminated outcomes ({total_eliminated}) must equal N-1 ({params['n_outcomes'] - 1})")
+                                    params['elim_outcomes'] = []
+                                else:
+                                    params['elim_outcomes'] = parsed_elim
+                        else:
+                            # Single resolution: must be int (final winner)
+                            if isinstance(parsed_elim, int):
+                                if 0 <= parsed_elim < params['n_outcomes']:
+                                    params['elim_outcomes'] = parsed_elim
+                                else:
+                                    st.error(f"Final winner must be between 0 and {params['n_outcomes'] - 1}")
+                                    params['elim_outcomes'] = 0
+                            else:
+                                st.error("Single resolution elim_outcomes must be an integer (final winner index)")
+                                params['elim_outcomes'] = 0
+                    else:
+                        params['elim_outcomes'] = [] if params['mr_enabled'] else 0
+                except json.JSONDecodeError:
+                    st.error("Invalid JSON format for elim outcomes")
+                    params['elim_outcomes'] = [] if params['mr_enabled'] else 0
 
             submitted = st.form_submit_button("Save Configuration")
             if submitted:
                 try:
-                    # Basic validation
-                    if params['mr_enabled'] and sum(len(elims) for elims in params['elim_outcomes']) != params['n_outcomes'] - 1:
-                        raise ValueError("Sum of eliminated outcomes must equal N-1")
-                    update_config({'params': params})
-                    st.success("Configuration saved.")
-                except ValueError as e:
-                    st.error(f"Invalid configuration: {e}")
+                    # Enhanced validation with comprehensive checks
+                    validation_errors = []
+                    
+                    # Multi-resolution validation
+                    if params['mr_enabled']:
+                        if not isinstance(params['elim_outcomes'], list):
+                            validation_errors.append("Multi-resolution requires elim_outcomes as list of lists")
+                        elif params['elim_outcomes']:
+                            total_eliminated = sum(len(elims) for elims in params['elim_outcomes'] if isinstance(elims, list))
+                            if total_eliminated != params['n_outcomes'] - 1:
+                                validation_errors.append(f"Sum of eliminated outcomes ({total_eliminated}) must equal N-1 ({params['n_outcomes'] - 1})")
+                            
+                            # Validate resolution timing consistency
+                            if len(params['res_offsets']) != len(params['elim_outcomes']):
+                                validation_errors.append("Resolution offsets and elim_outcomes must have same length")
+                            if len(params['freeze_durs']) != len(params['elim_outcomes']):
+                                validation_errors.append("Freeze durations and elim_outcomes must have same length")
+                    
+                    # Parameter range validation per TDD
+                    if params['zeta_start'] >= 1.0 / (params['n_outcomes'] - 1):
+                        validation_errors.append(f"zeta_start ({params['zeta_start']}) must be < 1/(N-1) = {1.0/(params['n_outcomes']-1):.4f}")
+                    if params['zeta_end'] >= 1.0 / (params['n_outcomes'] - 1):
+                        validation_errors.append(f"zeta_end ({params['zeta_end']}) must be < 1/(N-1) = {1.0/(params['n_outcomes']-1):.4f}")
+                    
+                    if params['p_min'] >= params['p_max']:
+                        validation_errors.append(f"p_min ({params['p_min']}) must be < p_max ({params['p_max']})")
+                    
+                    if params['gamma'] >= 0.001:
+                        validation_errors.append(f"gamma ({params['gamma']}) should be < 0.001 per TDD recommendations")
+                    
+                    # Timing validation
+                    if params['total_duration'] <= 0:
+                        validation_errors.append("Total duration must be positive")
+                    
+                    if validation_errors:
+                        for error in validation_errors:
+                            st.error(f"❌ {error}")
+                        st.error("Please fix validation errors before saving")
+                    else:
+                        update_config({'params': params})
+                        st.success("✅ Configuration saved and validated successfully")
+                        
+                except json.JSONDecodeError as json_error:
+                    st.error(f"❌ JSON parsing error: {json_error}")
+                except Exception as e:
+                    st.error(f"❌ Configuration error: {e}")
+                    st.exception(e)
 
     # Joined Users
     users = fetch_users()
@@ -488,29 +624,87 @@ def run_admin_app():
                         st.error("Failed to insert system users. Cannot start demo.")
                         return
                     
+                    # Initialize engine state explicitly per TDD requirements
+                    st.info("Initializing engine state...")
+                    try:
+                        from app.engine.state import init_state
+                        from app.db.queries import save_engine_state, fetch_engine_state
+                        
+                        # Check if engine state already exists
+                        existing_state = fetch_engine_state()
+                        if not existing_state or not existing_state.get('binaries'):
+                            st.info("Creating fresh engine state per TDD specification")
+                            fresh_engine_state = init_state(params)
+                            save_engine_state(fresh_engine_state)
+                            st.success("✅ Engine state initialized successfully")
+                        else:
+                            st.info("Engine state already exists, preserving current state")
+                    except Exception as state_error:
+                        st.error(f"Failed to initialize engine state: {state_error}")
+                        st.error("Cannot start demo without proper engine state")
+                        return
+                    
                     # Update config with current params and start demo
                     start_ts = get_current_ms()
                     st.info(f"Starting demo with timestamp: {start_ts}")
                     
-                    # Add start_ts_ms and current_round to params (not as separate keys)
+                    # Fix parameter nesting issue - store timing at top level for timer_service compatibility
                     params_with_timing = params.copy()
-                    params_with_timing['start_ts_ms'] = start_ts
                     params_with_timing['current_round'] = 0
                     
                     update_config({
-                        'params': params_with_timing,  # Include timing info in params
+                        'params': params_with_timing,
                         'status': 'RUNNING', 
-                        'start_ts_ms': start_ts  # This will be converted to start_ts for the database
+                        'start_ts_ms': start_ts,  # Top-level for timer_service.py compatibility
+                        'current_round': 0
                     })
                     
                     # Broadcast status change to all users via realtime
                     publish_demo_status_update('RUNNING', 'Demo has started! Trading is now active.')
                     
                     st.info("Config updated, starting services...")
-                    start_timer_service()
-                    start_batch_runner()
-                    st.success("Demo started! Refreshing page...")
-                    st.rerun()  # Force page refresh to show new status
+                    
+                    # Start services with health verification
+                    try:
+                        start_timer_service()
+                        st.info("✅ Timer service started")
+                        
+                        start_batch_runner()
+                        st.info("✅ Batch runner started")
+                        
+                        # Verify batch runner health immediately after startup
+                        st.info("Verifying batch runner health...")
+                        import time
+                        time.sleep(2)  # Give services time to initialize
+                        
+                        try:
+                            from app.runner.batch_runner import is_batch_runner_healthy, get_batch_runner_stats
+                            
+                            if is_batch_runner_healthy():
+                                stats = get_batch_runner_stats()
+                                st.success(f"✅ Batch runner is healthy (Thread: {stats.get('thread_alive', False)})")
+                            else:
+                                st.error("❌ Batch runner failed health check")
+                                st.warning("Demo may not process orders correctly")
+                                # Don't return - let demo start but warn user
+                                
+                        except ImportError:
+                            st.warning("⚠️ Could not verify batch runner health (monitoring not available)")
+                        except Exception as health_error:
+                            st.warning(f"⚠️ Health check failed: {health_error}")
+                        
+                        st.success("🎉 Demo started successfully! Refreshing page...")
+                        st.rerun()  # Force page refresh to show new status
+                        
+                    except Exception as service_error:
+                        st.error(f"Failed to start services: {service_error}")
+                        # Try to revert status back to DRAFT
+                        try:
+                            update_config({'status': 'DRAFT'})
+                            st.info("Reverted status back to DRAFT due to service startup failure")
+                        except:
+                            pass
+                        return
                     
                 except Exception as e:
                     st.error(f"Error starting demo: {e}")
@@ -583,10 +777,71 @@ def run_admin_app():
         st.download_button("Download Metrics CSV", csv_metrics, "metrics.csv")
     with col_exp4:
         if st.button("Generate Rankings CSV"):
-            export_rankings_csv("rankings.csv")
-            with open("rankings.csv", "rb") as f:
-                st.download_button("Download Rankings CSV", f.read(), "rankings.csv")
-            os.remove("rankings.csv")
+            try:
+                # Enhanced rankings export with post-resolution validation
+                if status == 'RESOLVED':
+                    st.info("🔍 Verifying post-resolution state for accurate rankings...")
+                    
+                    # Check if payouts have been applied
+                    try:
+                        from app.db.queries import fetch_engine_state
+                        from app.services.resolutions import get_resolution_status
+                        
+                        engine_state = fetch_engine_state()
+                        if engine_state:
+                            # Verify resolution completeness
+                            active_outcomes = [i for i, binary in enumerate(engine_state.get('binaries', [])) if binary.get('active', True)]
+                            
+                            if len(active_outcomes) == 1:
+                                st.success(f"✅ Resolution complete - Winner: Outcome {active_outcomes[0]}")
+                            elif len(active_outcomes) == 0:
+                                st.warning("⚠️ No active outcomes found - this may indicate resolution issues")
+                            else:
+                                st.warning(f"⚠️ Multiple active outcomes ({len(active_outcomes)}) - resolution may be incomplete")
+                            
+                            # Check for unfilled LOB pools that need pro-rata distribution
+                            lob_pools = engine_state.get('lob_pools', {})
+                            unfilled_volume = sum(float(pool.get('volume', 0)) for pool in lob_pools.values() if float(pool.get('volume', 0)) > 0)
+                            
+                            if unfilled_volume > 0:
+                                st.warning(f"⚠️ {unfilled_volume:.2f} USDC in unfilled LOB pools - pro-rata distribution may be needed")
+                                st.info("💡 Rankings may not include unfilled limit order returns per TDD requirements")
+                            else:
+                                st.success("✅ All LOB pools cleared - no unfilled returns to distribute")
+                        else:
+                            st.warning("⚠️ Could not verify engine state - rankings may be incomplete")
+                            
+                    except Exception as verify_error:
+                        st.warning(f"⚠️ Could not verify resolution state: {verify_error}")
+                        st.info("Proceeding with rankings export but results may be incomplete")
+                    
+                    st.info("📊 Generating comprehensive rankings with final balances...")
+                else:
+                    st.info("📊 Generating current rankings (demo not yet resolved)...")
+                
+                # Generate the rankings CSV
+                export_rankings_csv("rankings.csv")
+                
+                # Verify the file was created and has content
+                if os.path.exists("rankings.csv"):
+                    file_size = os.path.getsize("rankings.csv")
+                    if file_size > 0:
+                        st.success(f"✅ Rankings CSV generated ({file_size} bytes)")
+                        with open("rankings.csv", "rb") as f:
+                            st.download_button("Download Rankings CSV", f.read(), "rankings.csv")
+                        os.remove("rankings.csv")
+                    else:
+                        st.error("❌ Rankings CSV is empty - no user data found")
+                        if os.path.exists("rankings.csv"):
+                            os.remove("rankings.csv")
+                else:
+                    st.error("❌ Failed to generate rankings CSV file")
+                    
+            except Exception as export_error:
+                st.error(f"❌ Error generating rankings: {export_error}")
+                st.info("💡 Rankings export requires user data and completed trades")
+                if os.path.exists("rankings.csv"):
+                    os.remove("rankings.csv")
 
     # Graph
     st.subheader("Performance Graph")

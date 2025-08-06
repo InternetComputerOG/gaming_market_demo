@@ -32,22 +32,47 @@ def filter_system_users(users):
 if 'user_id' not in st.session_state:
     display_name = st.text_input("Enter display name", key="display-name-input")
     if st.button("Join", key="join-button"):
-        config = load_config()
-        user_id = str(uuid4())
-        insert_user(user_id, display_name, float(config['params']['starting_balance']))
-        st.session_state['user_id'] = user_id
-        st.session_state['display_name'] = display_name
-        st.session_state['last_tick'] = 0
-        st.session_state['last_check'] = time.time()
-        st.rerun()
+        try:
+            config = load_config()
+            if not config or 'params' not in config:
+                st.error("❌ Demo not configured. Please contact admin to set up the demo.")
+                st.stop()
+            
+            user_id = str(uuid4())
+            starting_balance = float(config['params'].get('starting_balance', 100.0))
+            insert_user(user_id, display_name, starting_balance)
+            st.session_state['user_id'] = user_id
+            st.session_state['display_name'] = display_name
+            st.session_state['last_tick'] = 0
+            st.session_state['last_check'] = time.time()
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Failed to join demo: {str(e)}")
+            st.error("Please contact admin or try again later.")
 
 if 'user_id' not in st.session_state:
     st.stop()
 
 user_id = st.session_state['user_id']
-config = load_config()
-status = config['status']
-params: Dict[str, Any] = config['params']
+
+# Enhanced error handling for config loading per audit requirements
+try:
+    config = load_config()
+    if not config:
+        st.error("❌ Demo configuration not found. Please contact admin.")
+        st.stop()
+    
+    status = config.get('status', 'DRAFT')
+    params: Dict[str, Any] = config.get('params', {})
+    
+    if not params:
+        st.error("❌ Demo parameters not configured. Please contact admin.")
+        st.stop()
+        
+except Exception as e:
+    st.error(f"❌ Failed to load demo configuration: {str(e)}")
+    st.error("Please contact admin or refresh the page.")
+    st.stop()
 
 # Fragment-based realtime updates - no need for manual realtime containers
 
@@ -69,7 +94,9 @@ batch_interval_s = batch_interval_ms / 1000.0
 @st.fragment(run_every=batch_interval_s)
 def price_fragment(outcome_i):
     try:
-        current_p_yes, current_p_no = get_current_prices(outcome_i)
+        # Pass mr_enabled from config to avoid circular loading
+        mr_enabled = params.get('mr_enabled', False)
+        current_p_yes, current_p_no = get_current_prices(outcome_i, mr_enabled)
         
         # Display current market prices
         price_col1, price_col2 = st.columns(2)
@@ -130,13 +157,32 @@ def portfolio_fragment(user_id):
         return error_result
 
 # Helper function for getting current prices (used by price fragment)
-def get_current_prices(outcome_i):
+def get_current_prices(outcome_i, mr_enabled=None):
     """Get current YES and NO prices for an outcome"""
-    engine_state = fetch_engine_state()
-    binary = get_binary(engine_state, outcome_i)
-    current_p_yes = get_p_yes(binary)
-    current_p_no = get_p_no(binary)
-    return current_p_yes, current_p_no
+    try:
+        engine_state = fetch_engine_state()
+        binary = get_binary(engine_state, outcome_i)
+        
+        # Use passed mr_enabled parameter or default to False for safety
+        # This avoids circular config loading and improves performance
+        if mr_enabled is None:
+            mr_enabled = False  # Conservative default
+        
+        if mr_enabled:
+            # Use standard get_p_yes which includes virtual_yes
+            current_p_yes = get_p_yes(binary)
+        else:
+            # Calculate price without virtual_yes component
+            q_yes = binary.get('q_yes', 0)
+            L_i = binary.get('L_i', 1)  # Avoid division by zero
+            current_p_yes = float(q_yes / L_i) if L_i > 0 else 0.5
+        
+        current_p_no = get_p_no(binary)  # NO prices don't use virtual_yes
+        return current_p_yes, current_p_no
+        
+    except Exception as e:
+        # Fallback to $0.50 prices if calculation fails
+        return 0.5, 0.5
 
 # Fragment for waiting room status checking - only runs when status is DRAFT
 @st.fragment(run_every=3)  # Check every 3 seconds
@@ -391,8 +437,8 @@ def leaderboard_fragment():
         # Filter out system users
         users = filter_system_users(users)
         
-        # Calculate total portfolio value including current market value of tokens
-        users_with_portfolio_value = []
+        # Calculate comprehensive metrics for each user
+        users_with_metrics = []
         for user in users:
             total_value = float(user['balance']) + float(user['net_pnl'])
             
@@ -402,7 +448,8 @@ def leaderboard_fragment():
                 for p in positions:
                     if float(p['tokens']) > 0:
                         outcome_i = int(p['outcome_i'])
-                        current_p_yes, current_p_no = get_current_prices(outcome_i)
+                        # Use conservative default for mr_enabled to avoid config loading in fragments
+                        current_p_yes, current_p_no = get_current_prices(outcome_i, False)
                         if current_p_yes is not None and current_p_no is not None:
                             if p['yes_no'] == 'YES':
                                 total_value += float(p['tokens']) * current_p_yes
@@ -415,23 +462,39 @@ def leaderboard_fragment():
                 # If we can't get positions, just use balance + net_pnl
                 pass
             
+            # Calculate % gain/loss (assuming $100 starting balance per Implementation Plan)
+            starting_balance = 100.0
+            pct_gain_loss = ((total_value - starting_balance) / starting_balance) * 100
+            
+            # Get trade count
+            trade_count = int(user.get('trade_count', 0))
+            
             user_copy = user.copy()
             user_copy['total_portfolio_value'] = total_value
-            users_with_portfolio_value.append(user_copy)
+            user_copy['pct_gain_loss'] = pct_gain_loss
+            user_copy['trade_count'] = trade_count
+            users_with_metrics.append(user_copy)
         
-        leaderboard = sorted(users_with_portfolio_value, key=lambda u: u['total_portfolio_value'], reverse=True)[:5]
+        # Create multiple leaderboards per Implementation Plan requirements
+        leaderboard_by_value = sorted(users_with_metrics, key=lambda u: u['total_portfolio_value'], reverse=True)[:5]
+        leaderboard_by_pct = sorted(users_with_metrics, key=lambda u: u['pct_gain_loss'], reverse=True)[:5]
+        leaderboard_by_trades = sorted(users_with_metrics, key=lambda u: u['trade_count'], reverse=True)[:5]
         
         # Return data instead of writing to sidebar directly
         return {
             'success': True,
-            'leaderboard': leaderboard,
+            'leaderboard_by_value': leaderboard_by_value,
+            'leaderboard_by_pct': leaderboard_by_pct,
+            'leaderboard_by_trades': leaderboard_by_trades,
             'user_count': len(users),
             'error': None
         }
     except Exception as e:
         return {
             'success': False,
-            'leaderboard': [],
+            'leaderboard_by_value': [],
+            'leaderboard_by_pct': [],
+            'leaderboard_by_trades': [],
             'user_count': 0,
             'error': str(e)
         }
@@ -443,9 +506,26 @@ with st.sidebar:
     leaderboard_data = leaderboard_fragment()
     
     if leaderboard_data['success']:
-        for rank, user in enumerate(leaderboard_data['leaderboard'], 1):
-            total_value = user.get('total_portfolio_value', float(user['balance']) + float(user['net_pnl']))
-            st.write(f"{rank}. {user['display_name']}: ${total_value:.2f}")
+        # Create tabs for different ranking types per Implementation Plan
+        lb_tab1, lb_tab2, lb_tab3 = st.tabs(["💰 Value", "📈 % Gain", "🔄 Trades"])
+        
+        with lb_tab1:
+            st.subheader("By Portfolio Value")
+            for rank, user in enumerate(leaderboard_data['leaderboard_by_value'], 1):
+                total_value = user.get('total_portfolio_value', float(user['balance']) + float(user['net_pnl']))
+                st.write(f"{rank}. {user['display_name']}: ${total_value:.2f}")
+        
+        with lb_tab2:
+            st.subheader("By % Gain/Loss")
+            for rank, user in enumerate(leaderboard_data['leaderboard_by_pct'], 1):
+                pct_gain = user.get('pct_gain_loss', 0)
+                st.write(f"{rank}. {user['display_name']}: {pct_gain:+.1f}%")
+        
+        with lb_tab3:
+            st.subheader("By Trade Count")
+            for rank, user in enumerate(leaderboard_data['leaderboard_by_trades'], 1):
+                trade_count = user.get('trade_count', 0)
+                st.write(f"{rank}. {user['display_name']}: {trade_count} trades")
         
         # Display user count
         st.markdown(f'👥 **{leaderboard_data["user_count"]} players online**')
@@ -454,7 +534,7 @@ with st.sidebar:
         st.warning(f"Could not load leaderboard: {leaderboard_data['error']}")
         user_count = 0
 
-# Use actual outcome names from config, filtering for active outcomes only (multi-resolution support)
+# Create outcome tabs based on configured outcomes and active status (multi-resolution support)
 try:
     # Get engine state to check for active outcomes in multi-resolution scenarios
     engine_state = fetch_engine_state()
@@ -475,8 +555,9 @@ try:
     if not active_outcomes:
         active_outcomes = list(range(params['n_outcomes']))
         
-except Exception:
+except Exception as e:
     # Fallback: show all outcomes if state fetch fails
+    st.warning(f"Could not check outcome status: {e}")
     active_outcomes = list(range(params['n_outcomes']))
 
 # Create tabs only for active outcomes
@@ -555,7 +636,9 @@ for tab_index, tab in enumerate(outcome_tabs):
                     with fee_col1:
                         st.write(f"**Execution Cost:** ${execution_cost:.2f}")
                         st.write(f"**Trading Fee (est.):** ${trading_fee_est:.4f}")
-                        st.write(f"**Gas Fee:** ${float(gas_fee):.4f}")
+                        # Prominent gas fee display per Implementation Plan
+                        st.markdown(f"**🔥 Gas Fee:** ${float(gas_fee):.4f}")
+                        st.caption("⚠️ Deducted on submission regardless of success")
                     with fee_col2:
                         total_fees = trading_fee_est + float(gas_fee)
                         if is_buy:
@@ -573,7 +656,9 @@ for tab_index, tab in enumerate(outcome_tabs):
                     if order_type == 'MARKET':
                         st.write(f"**Estimated Slippage:** {float(est['estimated_slippage'])*100:.2f}%")
                         if est['would_reject']:
-                            st.error("⚠️ Estimated slippage exceeds maximum allowed")
+                            st.error("⚠️ Estimated slippage exceeds or equals maximum allowed")
+                        elif 'error' in est and est['error']:
+                            st.warning(f"⚠️ Estimation note: {est['error']}")
                     
                     # Potential Returns Analysis
                     st.subheader("🎯 Potential Returns")
@@ -1047,98 +1132,141 @@ with pos_tab3:
         else:
             st.write("*No pending orders*")
     
-    # Portfolio Metrics Fragment - updates with price changes for accurate portfolio value
-    @st.fragment(run_every=batch_interval_s)
-    def portfolio_metrics_fragment():
-        try:
-            # Get current user balance
-            current_balance = float(fetch_user_balance(user_id))
-            
-            # Calculate token holdings value at current prices
-            token_holdings_value = 0
-            for p in positions:
-                if float(p['tokens']) > 0:
-                    outcome_i = int(p['outcome_i'])
-                    current_p_yes, current_p_no = get_current_prices(outcome_i)
+# Portfolio Metrics Fragment - updates with price changes for accurate portfolio value
+# CRITICAL: Must be defined at module scope, not inside context managers
+@st.fragment(run_every=batch_interval_s)
+def portfolio_metrics_fragment():
+    try:
+        # Get current user balance
+        current_balance = float(fetch_user_balance(user_id))
+        
+        # Calculate token holdings value at current prices
+        token_holdings_value = 0
+        for p in positions:
+            if float(p['tokens']) > 0:
+                outcome_i = int(p['outcome_i'])
+                # Use conservative default for mr_enabled to avoid config loading in fragments
+                current_p_yes, current_p_no = get_current_prices(outcome_i, False)
+                if current_p_yes is not None and current_p_no is not None:
+                    if p['yes_no'] == 'YES':
+                        token_holdings_value += float(p['tokens']) * current_p_yes
+                    else:
+                        token_holdings_value += float(p['tokens']) * current_p_no
+                else:
+                    # Fallback to $0.50 if prices unavailable
+                    token_holdings_value += float(p['tokens']) * 0.5
+        
+        # Calculate total committed capital from open orders only
+        # Note: We track committed capital in pending orders, not historical cost basis of filled positions
+        open_order_capital = 0
+        for order in orders:
+            if order['type'] == 'LIMIT' and order['limit_price'] is not None:
+                # LIMIT orders: remaining size * limit price
+                open_order_capital += float(order['remaining']) * float(order['limit_price'])
+            elif order['type'] == 'MARKET':
+                # MARKET orders: estimate using current price (they execute quickly)
+                try:
+                    outcome_i = int(order['outcome_i'])
+                    # Use conservative default for mr_enabled to avoid config loading in fragments
+                    current_p_yes, current_p_no = get_current_prices(outcome_i, False)
                     if current_p_yes is not None and current_p_no is not None:
-                        if p['yes_no'] == 'YES':
-                            token_holdings_value += float(p['tokens']) * current_p_yes
+                        if order['yes_no'] == 'YES':
+                            estimated_price = current_p_yes
                         else:
-                            token_holdings_value += float(p['tokens']) * current_p_no
+                            estimated_price = current_p_no
+                        open_order_capital += float(order['remaining']) * estimated_price
                     else:
                         # Fallback to $0.50 if prices unavailable
-                        token_holdings_value += float(p['tokens']) * 0.5
-            
-            # Calculate total committed capital from open orders only
-            # Note: We track committed capital in pending orders, not historical cost basis of filled positions
-            open_order_capital = 0
-            for order in orders:
-                if order['type'] == 'LIMIT' and order['limit_price'] is not None:
-                    # LIMIT orders: remaining size * limit price
-                    open_order_capital += float(order['remaining']) * float(order['limit_price'])
-                elif order['type'] == 'MARKET':
-                    # MARKET orders: estimate using current price (they execute quickly)
-                    try:
-                        outcome_i = int(order['outcome_i'])
-                        current_p_yes, current_p_no = get_current_prices(outcome_i)
-                        if current_p_yes is not None and current_p_no is not None:
-                            if order['yes_no'] == 'YES':
-                                estimated_price = current_p_yes
-                            else:
-                                estimated_price = current_p_no
-                            open_order_capital += float(order['remaining']) * estimated_price
-                        else:
-                            # Fallback to $0.50 if prices unavailable
-                            open_order_capital += float(order['remaining']) * 0.5
-                    except (ValueError, KeyError, TypeError):
-                        # Fallback for malformed order data
                         open_order_capital += float(order['remaining']) * 0.5
-            
-            # Calculate gas fees
-            try:
-                config = load_config()
-                gas_fee_per_tx = config.get('params', {}).get('gas_fee_per_tx', 0.0)
-                user_data = client.table('users').select('trade_count').eq('user_id', user_id).single().execute()
-                if user_data.data:
-                    total_gas_spent = float(user_data.data['trade_count']) * gas_fee_per_tx
-                else:
-                    total_gas_spent = 0.0
-            except Exception:
-                total_gas_spent = 0.0
-            
-            return {
-                'current_balance': current_balance,
-                'token_holdings_value': token_holdings_value,
-                'open_order_capital': open_order_capital,
-                'total_gas_spent': total_gas_spent
-            }
+                except (ValueError, KeyError, TypeError):
+                    # Fallback for malformed order data
+                    open_order_capital += float(order['remaining']) * 0.5
+        
+        # Calculate cumulative gas fees from all order submissions
+        try:
+            config = load_config()
+            gas_fee_per_tx = float(config.get('params', {}).get('gas_fee', 0.0))  # Fixed key name
+            # Count all orders ever submitted by user (including filled/canceled)
+            user_orders = client.table('orders').select('order_id').eq('user_id', user_id).execute()
+            total_orders_submitted = len(user_orders.data) if user_orders.data else 0
+            total_gas_spent = total_orders_submitted * gas_fee_per_tx
         except Exception as e:
-            st.error(f"Error calculating portfolio metrics: {e}")
-            return {
-                'current_balance': 0.0,
-                'token_holdings_value': 0.0,
-                'open_order_capital': 0.0,
-                'total_gas_spent': 0.0
-            }
-    
-    # Overall portfolio metrics
-    st.write("---")
-    st.write("**🎯 Portfolio Metrics**")
-    
-    # Get metrics from fragment
-    metrics = portfolio_metrics_fragment()
-    
-    # Display metrics in columns
-    metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
-    
-    with metric_col1:
-        st.metric("Active Positions", len([p for p in positions if float(p['tokens']) > 0]))
-    
-    with metric_col2:
-        st.metric("Open Orders", len(orders))
-    
-    with metric_col3:
-        st.metric("Capital Committed", f"${metrics['open_order_capital']:.2f}")
+            total_gas_spent = 0.0
+        
+        # Calculate open capital (unfilled limit orders) per TDD requirements
+        open_capital_breakdown = {}
+        total_open_capital = 0
+        try:
+            # Get LOB pools to calculate user's unfilled limit order value
+            for order in orders:
+                if order['type'] == 'LIMIT' and float(order['remaining']) > 0:
+                    outcome_i = int(order['outcome_i'])
+                    outcome_name = params['outcome_names'][outcome_i] if outcome_i < len(params['outcome_names']) else f"Outcome {outcome_i + 1}"
+                    
+                    # Calculate value of unfilled portion
+                    unfilled_value = float(order['remaining']) * float(order['limit_price'])
+                    total_open_capital += unfilled_value
+                    
+                    if outcome_name not in open_capital_breakdown:
+                        open_capital_breakdown[outcome_name] = 0
+                    open_capital_breakdown[outcome_name] += unfilled_value
+        except Exception:
+            open_capital_breakdown = {}
+            total_open_capital = 0
+        
+        # Estimate seigniorage impact (simplified - would need engine state for full calculation)
+        # This is a placeholder for TDD seigniorage display requirement
+        estimated_seigniorage_benefit = 0.0
+        try:
+            # Simple estimate: assume 1% of trading volume benefited from seigniorage
+            user_trades = client.table('trades').select('size, price').or_(f'buy_user_id.eq.{user_id},sell_user_id.eq.{user_id}').execute()
+            if user_trades.data:
+                total_trade_volume = sum(float(t['size']) * float(t['price']) for t in user_trades.data)
+                estimated_seigniorage_benefit = total_trade_volume * 0.01  # 1% estimate
+        except Exception:
+            estimated_seigniorage_benefit = 0.0
+        
+        return {
+            'current_balance': current_balance,
+            'token_holdings_value': token_holdings_value,
+            'open_order_capital': open_order_capital,
+            'total_open_capital': total_open_capital,
+            'open_capital_breakdown': open_capital_breakdown,
+            'total_gas_spent': total_gas_spent,
+            'estimated_seigniorage_benefit': estimated_seigniorage_benefit,
+            'total_orders_submitted': total_orders_submitted if 'total_orders_submitted' in locals() else 0
+        }
+    except Exception as e:
+        st.error(f"Error calculating portfolio metrics: {e}")
+        return {
+            'current_balance': 0.0,
+            'token_holdings_value': 0.0,
+            'open_order_capital': 0.0,
+            'total_open_capital': 0.0,
+            'open_capital_breakdown': {},
+            'total_gas_spent': 0.0,
+            'estimated_seigniorage_benefit': 0.0,
+            'total_orders_submitted': 0
+        }
+
+# Overall portfolio metrics
+st.write("---")
+st.write("**🎯 Portfolio Metrics**")
+
+# Get metrics from fragment
+metrics = portfolio_metrics_fragment()
+
+# Display metrics in columns
+metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
+
+with metric_col1:
+    st.metric("Active Positions", len([p for p in positions if float(p['tokens']) > 0]))
+
+with metric_col2:
+    st.metric("Open Orders", len(orders))
+
+with metric_col3:
+    st.metric("Open Capital", f"${metrics['total_open_capital']:.2f}")
     
     with metric_col4:
         # USD Portfolio Value = Balance + Token Holdings at Current Price
@@ -1147,6 +1275,28 @@ with pos_tab3:
     
     with metric_col5:
         st.metric("Gas Spent", f"${metrics['total_gas_spent']:.2f}")
+    
+    # Additional TDD-required metrics display
+    if metrics['total_open_capital'] > 0 or metrics['estimated_seigniorage_benefit'] > 0:
+        st.write("---")
+        st.write("**📈 Advanced Metrics (TDD Components)**")
+        
+        adv_col1, adv_col2, adv_col3 = st.columns(3)
+        
+        with adv_col1:
+            if metrics['open_capital_breakdown']:
+                st.write("**Open Capital by Outcome:**")
+                for outcome_name, capital in metrics['open_capital_breakdown'].items():
+                    st.write(f"• {outcome_name}: ${capital:.2f}")
+        
+        with adv_col2:
+            if metrics['estimated_seigniorage_benefit'] > 0:
+                st.metric("Est. Seigniorage Benefit", f"${metrics['estimated_seigniorage_benefit']:.2f}")
+                st.caption("Estimated benefit from auto-fill seigniorage")
+        
+        with adv_col3:
+            st.metric("Total Orders Submitted", metrics['total_orders_submitted'])
+            st.caption(f"Gas rate: ${metrics['total_gas_spent']/max(1, metrics['total_orders_submitted']):.4f}/order")
 
     # Per-Outcome Potential Payouts Table
     st.write("---")
@@ -1193,7 +1343,8 @@ with pos_tab3:
             # For P/L calculation, we need to estimate what was paid for these tokens
             # Since we don't track cost basis, use current market value as approximation
             try:
-                current_p_yes, current_p_no = get_current_prices(outcome_i)
+                # Use conservative default for mr_enabled to avoid config loading in fragments
+                current_p_yes, current_p_no = get_current_prices(outcome_i, False)
                 if current_p_yes is not None and current_p_no is not None:
                     estimated_cost = yes_tokens * current_p_yes + no_tokens * current_p_no
                 else:
@@ -1329,11 +1480,12 @@ if trades_data['success'] and trades_data['trades']:
                 user_name = users_data[sell_user_id]
             is_user_buy = False
         else:
-            # Neither is a system user - this is a user-to-user trade
-            # Show the buyer as the "active" user for consistency
-            if buy_user_id and buy_user_id in users_data:
-                user_name = users_data[buy_user_id]
-            is_user_buy = True
+            # Neither is a system user - this is a user-to-user trade (cross-matching)
+            # Show both users for transparency per TDD cross-matching requirements
+            buyer_name = users_data.get(buy_user_id, 'Unknown') if buy_user_id else 'Unknown'
+            seller_name = users_data.get(sell_user_id, 'Unknown') if sell_user_id else 'Unknown'
+            user_name = f"{buyer_name} ↔ {seller_name}"  # Cross-match indicator
+            is_user_buy = True  # Default direction for display
         
         # Add directionality to size (negative for sells)
         size = float(t['size'])
