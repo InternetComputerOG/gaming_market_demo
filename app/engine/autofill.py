@@ -170,6 +170,11 @@ def apply_rebates(surplus: Decimal, sigma: Decimal, original_volume: Decimal, sh
             balance_deltas[user_id] = pro_rata_rebate
 
 def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EngineParams) -> Tuple[Decimal, List[AutoFillEvent]]:
+    # CRITICAL FIX: Ensure diversion is Decimal type at function entry to prevent abs() string errors
+    if not isinstance(diversion, Decimal):
+        print(f"WARNING: auto_fill received non-Decimal diversion: {type(diversion)}, value: {diversion}")
+        diversion = Decimal(str(diversion)) if diversion is not None else Decimal('0')
+    
     binary = state['binaries'][j]
     if not binary['active'] or not params['af_enabled'] or diversion == Decimal('0'):
         return Decimal('0'), []
@@ -342,6 +347,11 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             })
             pools_filled += 1
             print(f"DEBUG: Event created, pools_filled now = {pools_filled}")
+    # CRITICAL FIX: Ensure diversion is Decimal type before using abs() to prevent string error
+    if not isinstance(diversion, Decimal):
+        print(f"WARNING: diversion is not Decimal type: {type(diversion)}, value: {diversion}")
+        diversion = Decimal(str(diversion)) if diversion is not None else Decimal('0')
+    
     if total_surplus > Decimal(str(params['af_max_surplus'])) * (abs(diversion) / Decimal(str(params['zeta_start']))):
         total_surplus = Decimal(str(params['af_max_surplus'])) * (abs(diversion) / Decimal(str(params['zeta_start'])))
     return total_surplus, events

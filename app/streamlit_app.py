@@ -330,18 +330,244 @@ if status == 'FROZEN':
     st.stop()
 
 if status == 'RESOLVED':
-    st.write("Market resolved")
-    users = client.table('users').select('*').execute().data
+    st.title("🏆 Demo Resolved - Final Results")
     
-    # Filter out system users
-    users = filter_system_users(users)
+    # Get winner information from config params
+    final_winner = params.get('final_winner', None)
+    outcome_names = params.get('outcome_names', [])
     
-    rankings = sorted(users, key=lambda u: float(u['net_pnl']), reverse=True)
-    starting_balance = params.get('starting_balance', 0)
-    st.table([{ 'Name': r['display_name'], 'Net PNL': float(r['net_pnl']), '% Gain': float(r['net_pnl']) / float(starting_balance) * 100 if starting_balance else 0, 'Trades': r['trade_count'] } for r in rankings])
-    from app.scripts.generate_graph import generate_graph
-    fig = generate_graph()
-    st.pyplot(fig)
+    if final_winner is not None and final_winner < len(outcome_names):
+        st.success(f"🎉 **WINNER: {outcome_names[final_winner]}** 🎉")
+    else:
+        st.info("📊 Demo completed - reviewing final results")
+    
+    # Create tabs for different views
+    results_tab1, results_tab2, results_tab3, results_tab4 = st.tabs(["🏆 Final Rankings", "💰 User Payouts", "📊 Final Positions", "📈 Market Metrics"])
+    
+    with results_tab1:
+        st.header("🏆 Final Rankings")
+        
+        # Get all users and filter system users
+        users = client.table('users').select('*').execute().data
+        users = filter_system_users(users)
+        
+        if users:
+            # Sort by multiple criteria
+            rankings = sorted(users, key=lambda u: (
+                float(u['net_pnl']),  # Primary: Net P&L
+                float(u['balance']),  # Secondary: Final balance
+                -int(u['trade_count'])  # Tertiary: More trades = higher rank if tied
+            ), reverse=True)
+            
+            starting_balance = float(params.get('starting_balance', 100.0))
+            
+            # Create comprehensive rankings table
+            rankings_data = []
+            for i, user in enumerate(rankings):
+                pnl = float(user['net_pnl'])
+                balance = float(user['balance'])
+                trades = int(user['trade_count'])
+                pct_gain = (pnl / starting_balance * 100) if starting_balance > 0 else 0
+                
+                rankings_data.append({
+                    'Rank': i + 1,
+                    'Player': user['display_name'],
+                    'Final Balance': f"${balance:.2f}",
+                    'Net P&L': f"${pnl:.2f}",
+                    '% Gain/Loss': f"{pct_gain:+.1f}%",
+                    'Total Trades': trades
+                })
+            
+            st.dataframe(rankings_data, use_container_width=True)
+            
+            # Highlight top performers
+            if len(rankings) >= 3:
+                st.subheader("🥇 Top 3 Performers")
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("🥇 1st Place", rankings[0]['display_name'], 
+                             f"${float(rankings[0]['net_pnl']):.2f}")
+                
+                with col2:
+                    st.metric("🥈 2nd Place", rankings[1]['display_name'], 
+                             f"${float(rankings[1]['net_pnl']):.2f}")
+                
+                with col3:
+                    st.metric("🥉 3rd Place", rankings[2]['display_name'], 
+                             f"${float(rankings[2]['net_pnl']):.2f}")
+        else:
+            st.info("No user data available for rankings.")
+    
+    with results_tab2:
+        st.header("💰 Final Payouts & Positions")
+        
+        # Get user positions
+        try:
+            positions_response = client.table('positions').select('*').execute()
+            all_positions = positions_response.data if positions_response.data else []
+            
+            if all_positions:
+                # Group positions by user
+                user_positions = {}
+                for pos in all_positions:
+                    user_id = pos['user_id']
+                    if user_id not in user_positions:
+                        user_positions[user_id] = []
+                    user_positions[user_id].append(pos)
+                
+                # Get user names
+                users_dict = {u['user_id']: u['display_name'] for u in users}
+                
+                st.subheader("Final Token Holdings & Payouts")
+                
+                for user_id, positions in user_positions.items():
+                    user_name = users_dict.get(user_id, f"User {user_id[:8]}")
+                    
+                    # Skip system users
+                    if user_name in SYSTEM_USERS:
+                        continue
+                    
+                    with st.expander(f"👤 {user_name}", expanded=False):
+                        position_data = []
+                        total_payout = 0
+                        
+                        for pos in positions:
+                            outcome_i = pos['outcome_i']
+                            yes_no = pos['yes_no']
+                            tokens = float(pos['tokens'])
+                            
+                            if tokens > 0:
+                                outcome_name = outcome_names[outcome_i] if outcome_i < len(outcome_names) else f"Outcome {outcome_i}"
+                                
+                                # Calculate payout (simplified - $1 per winning token)
+                                payout = 0
+                                if final_winner is not None:
+                                    if outcome_i == final_winner and yes_no == 'YES':
+                                        payout = tokens  # $1 per YES token for winner
+                                    elif outcome_i != final_winner and yes_no == 'NO':
+                                        payout = tokens  # $1 per NO token for losers
+                                
+                                total_payout += payout
+                                
+                                position_data.append({
+                                    'Outcome': outcome_name,
+                                    'Token': yes_no,
+                                    'Holdings': f"{tokens:.2f}",
+                                    'Payout': f"${payout:.2f}"
+                                })
+                        
+                        if position_data:
+                            st.dataframe(position_data, use_container_width=True)
+                            st.metric("Total Token Payout", f"${total_payout:.2f}")
+                        else:
+                            st.info("No token positions")
+            else:
+                st.info("No position data available.")
+                
+        except Exception as e:
+            st.error(f"Error loading position data: {e}")
+    
+    with results_tab3:
+        st.header("📊 Final Market State")
+        
+        # Show final prices and market state
+        try:
+            engine_state = fetch_engine_state()
+            if engine_state and 'binaries' in engine_state:
+                st.subheader("Final Outcome Prices")
+                
+                price_data = []
+                for binary in engine_state['binaries']:
+                    outcome_i = binary['outcome_i']
+                    outcome_name = outcome_names[outcome_i] if outcome_i < len(outcome_names) else f"Outcome {outcome_i}"
+                    
+                    # Get final prices
+                    p_yes = get_p_yes(binary)
+                    p_no = get_p_no(binary)
+                    
+                    is_winner = (final_winner == outcome_i) if final_winner is not None else False
+                    status_icon = "🏆" if is_winner else "❌"
+                    
+                    price_data.append({
+                        'Status': status_icon,
+                        'Outcome': outcome_name,
+                        'Final YES Price': f"${p_yes:.4f}",
+                        'Final NO Price': f"${p_no:.4f}",
+                        'Active': "✅" if binary.get('active', True) else "❌"
+                    })
+                
+                st.dataframe(price_data, use_container_width=True)
+                
+                # Market maker metrics
+                st.subheader("Market Maker Performance")
+                try:
+                    metrics_response = client.table('metrics').select('*').order('tick_id', desc=True).limit(1).execute()
+                    if metrics_response.data:
+                        final_metrics = metrics_response.data[0]
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Volume", f"${float(final_metrics.get('volume', 0)):.2f}")
+                        with col2:
+                            st.metric("MM Risk", f"${float(final_metrics.get('mm_risk', 0)):.2f}")
+                        with col3:
+                            st.metric("MM Profit", f"${float(final_metrics.get('mm_profit', 0)):.2f}")
+                except Exception as e:
+                    st.warning(f"Could not load final metrics: {e}")
+            else:
+                st.info("No engine state data available.")
+                
+        except Exception as e:
+            st.error(f"Error loading market state: {e}")
+    
+    with results_tab4:
+        st.header("📈 Market Performance Over Time")
+        
+        try:
+            from app.scripts.generate_graph import generate_graph
+            fig = generate_graph()
+            st.pyplot(fig)
+        except Exception as e:
+            st.error(f"Error generating performance graph: {e}")
+            st.info("Graph generation failed - this may be due to insufficient data.")
+        
+        # Additional summary stats
+        st.subheader("📊 Demo Summary")
+        try:
+            # Get total trades
+            trades_response = client.table('trades').select('*').execute()
+            total_trades = len(trades_response.data) if trades_response.data else 0
+            
+            # Get total participants
+            total_participants = len(users) if users else 0
+            
+            # Demo duration
+            demo_duration = "N/A"
+            if 'start_ts' in config and config['start_ts']:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(config['start_ts'].replace('Z', '+00:00'))
+                    end_dt = datetime.now(start_dt.tzinfo)
+                    duration_seconds = (end_dt - start_dt).total_seconds()
+                    demo_duration = f"{duration_seconds/60:.1f} minutes"
+                except:
+                    pass
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Participants", total_participants)
+            with col2:
+                st.metric("Total Trades", total_trades)
+            with col3:
+                st.metric("Demo Duration", demo_duration)
+                
+        except Exception as e:
+            st.warning(f"Could not load summary stats: {e}")
+    
+    st.success("🎉 Thank you for participating in the Gaming Market Demo!")
+    st.info("💡 This demo showcased a multi-outcome prediction market with advanced AMM mechanics, cross-matching, and dynamic parameters.")
+    
     st.stop()
 
 current_ms = get_current_ms()
