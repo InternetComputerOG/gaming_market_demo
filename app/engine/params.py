@@ -22,15 +22,26 @@ class Params(TypedDict):
     resolution_prob: float  # Demo resolution probability for multi-resolution
 
 def get_default_params() -> Params:
+    """Get default parameters for legacy Params structure.
+    
+    Dynamically loads values from app/config.py to avoid duplication,
+    mapping comprehensive EngineParams to legacy Params structure.
+    """
+    from app.config import get_default_engine_params
+    
+    # Load comprehensive engine params from config
+    engine_params = get_default_engine_params()
+    
+    # Map to legacy Params structure for backward compatibility
     return {
-        'alpha': 1.0,
-        'beta': 1.0,  # Fixed: Test expects beta=1.0
-        'trade_fee': 0.01,
-        'liquidity_initial': 1000.0 / 3,  # Align with TDD Z/N example, assuming N=3 default
-        'min_liquidity': 0.0,  # Fixed: Test expects min_liquidity=0.0
-        'max_imbalance_ratio': 0.99,  # Fixed: Tied to p_max, should be <1
-        'min_auto_fill': 0.1,
-        'resolution_prob': 0.5,
+        'alpha': 1.0,  # Legacy parameter, no direct mapping
+        'beta': 1.0,   # Legacy parameter, no direct mapping
+        'trade_fee': engine_params['f'],  # Map f -> trade_fee
+        'liquidity_initial': engine_params['z'] / engine_params['n_outcomes'],  # Map z/n -> liquidity_initial
+        'min_liquidity': 0.0,  # Legacy parameter, no direct mapping
+        'max_imbalance_ratio': engine_params['p_max'],  # Map p_max -> max_imbalance_ratio
+        'min_auto_fill': engine_params['af_cap_frac'],  # Map af_cap_frac -> min_auto_fill
+        'resolution_prob': 0.5,  # Legacy parameter, no direct mapping
     }
 
 def validate_params(params: Params) -> None:

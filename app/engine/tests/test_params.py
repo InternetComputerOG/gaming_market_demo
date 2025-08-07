@@ -9,11 +9,11 @@ def test_get_default_params():
     assert params['alpha'] == 1.0
     assert params['beta'] == 1.0
     assert params['trade_fee'] == 0.01
-    assert params['liquidity_initial'] == 10000.0 / 3  # Align with TDD Z/N example, assuming N=3 default
+    assert params['liquidity_initial'] == 1000.0 / 3  # Now dynamically loaded from config: z/n_outcomes
     assert params['min_liquidity'] == 0.0
-    assert params['max_imbalance_ratio'] == 0.99  # Tied to p_max
-    assert params['min_auto_fill'] == 0.1
-    assert params['resolution_prob'] == 0.5  # Placeholder for mr/resolution defaults
+    assert params['max_imbalance_ratio'] == 0.99  # Now dynamically loaded from config: p_max
+    assert params['min_auto_fill'] == 0.1  # Now dynamically loaded from config: af_cap_frac
+    assert params['resolution_prob'] == 0.5  # Legacy parameter, no direct mapping
     # Ensure all keys present per TypedDict
     expected_keys = {'alpha', 'beta', 'trade_fee', 'liquidity_initial', 'min_liquidity',
                      'max_imbalance_ratio', 'min_auto_fill', 'resolution_prob'}
