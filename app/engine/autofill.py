@@ -60,7 +60,8 @@ def binary_search_max_delta(pool_tick: Decimal, is_buy: bool, is_yes: bool, bina
     low = Decimal('0')
     high = max_high
     
-
+    # Use None for dyn_params to use static parameters in autofill
+    dyn_params = None
     
     # Handle edge cases
     if max_high <= Decimal('0'):
@@ -75,7 +76,7 @@ def binary_search_max_delta(pool_tick: Decimal, is_buy: bool, is_yes: bool, bina
         
         try:
             if is_buy:
-                X_mid = buy_cost_yes(binary, mid, params, f_i) if is_yes else buy_cost_no(binary, mid, params, f_i)
+                X_mid = buy_cost_yes(binary, mid, params, f_i, dyn_params) if is_yes else buy_cost_no(binary, mid, params, f_i, dyn_params)
                 p_mid = get_new_p_yes_after_buy(binary, mid, X_mid, f_i) if is_yes else get_new_p_no_after_buy(binary, mid, X_mid, f_i)
                 charge_mid = pool_tick * mid
                 surplus_mid = charge_mid - X_mid
@@ -215,7 +216,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 for _ in range(10):
                     mid_search = (low_search + high_search) / Decimal('2')
                     try:
-                        cost_mid = buy_cost_yes(binary, mid_search, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, mid_search, params, f_j)
+                        cost_mid = buy_cost_yes(binary, mid_search, params, f_j, dyn_params) if yes_no == 'YES' else buy_cost_no(binary, mid_search, params, f_j, dyn_params)
                         if cost_mid <= pool_volume:
                             low_search = mid_search
                         else:
@@ -232,7 +233,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             # Debug: check if smaller deltas would be profitable
             for test_delta in [Decimal('10'), Decimal('50'), Decimal('100')]:
                 if test_delta <= max_high:
-                    test_cost = buy_cost_yes(binary, test_delta, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, test_delta, params, f_j)
+                    test_cost = buy_cost_yes(binary, test_delta, params, f_j, dyn_params) if yes_no == 'YES' else buy_cost_no(binary, test_delta, params, f_j, dyn_params)
                     test_charge = pool_tick * test_delta
                     test_surplus = test_charge - test_cost
                     print(f"DEBUG: test_delta={test_delta}, cost={test_cost}, charge={test_charge}, surplus={test_surplus}")
@@ -241,7 +242,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 print(f"DEBUG: Delta <= 0, skipping")
                 continue
             if is_increase:
-                X = buy_cost_yes(binary, delta, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j)
+                X = buy_cost_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j, dyn_params)
                 charge = usdc_amount(pool_tick * delta)
                 surplus = charge - X  # For buys: what we charge minus what it costs
                 print(f"DEBUG: Buy - X={X}, charge={charge}, surplus={surplus}")
@@ -262,7 +263,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 delta = cap_delta
                 # Recalculate with capped delta
                 if is_increase:
-                    X = buy_cost_yes(binary, delta, params, f_j) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j)
+                    X = buy_cost_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j, dyn_params)
                     charge = pool_tick * delta
                     surplus = charge - X
                 else:

@@ -50,7 +50,7 @@ def get_new_p_no_after_sell(binary: BinaryState, delta: Decimal, X: Decimal, f_i
     return safe_divide(q_no - delta, L - f_i * X)
 
 
-def buy_cost_yes(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal) -> Decimal:
+def buy_cost_yes(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal, dyn_params: Dict[str, Decimal] = None) -> Decimal:
     """
     Computes cost X for buying delta YES tokens in the binary, using quadratic solve and penalty.
     Per TDD derivations: X = delta * (mu * p + nu * p') / (mu + nu) + kappa * delta^2, with p' = (q_yes_eff + delta) / (L + f_i * X).
@@ -60,9 +60,15 @@ def buy_cost_yes(binary: BinaryState, delta: Decimal, params: EngineParams, f_i:
         return Decimal('0')
     validate_size(delta)
 
-    mu = Decimal(params['mu_start'])
-    nu = Decimal(params['nu_start'])
-    kappa = Decimal(params['kappa_start'])
+    # Use dynamic parameters if provided, otherwise fall back to static
+    if dyn_params:
+        mu = dyn_params['mu']
+        nu = dyn_params['nu']
+        kappa = dyn_params['kappa']
+    else:
+        mu = Decimal(params['mu_start'])
+        nu = Decimal(params['nu_start'])
+        kappa = Decimal(params['kappa_start'])
     p_max = Decimal(params['p_max'])
     eta = Decimal(params['eta'])
 
@@ -133,15 +139,21 @@ def sell_received_yes(binary: BinaryState, delta: Decimal, params: EngineParams,
     return price_value(X)
 
 
-def buy_cost_no(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal) -> Decimal:
+def buy_cost_no(binary: BinaryState, delta: Decimal, params: EngineParams, f_i: Decimal, dyn_params: Dict[str, Decimal] = None) -> Decimal:
     """Symmetric to buy_cost_yes but for NO, no virtual."""
     if delta == Decimal('0'):
         return Decimal('0')
     validate_size(delta)
 
-    mu = Decimal(params['mu_start'])
-    nu = Decimal(params['nu_start'])
-    kappa = Decimal(params['kappa_start'])
+    # Use dynamic parameters if provided, otherwise fall back to static
+    if dyn_params:
+        mu = dyn_params['mu']
+        nu = dyn_params['nu']
+        kappa = dyn_params['kappa']
+    else:
+        mu = Decimal(params['mu_start'])
+        nu = Decimal(params['nu_start'])
+        kappa = Decimal(params['kappa_start'])
     p_max = Decimal(params['p_max'])
     eta = Decimal(params['eta'])
 

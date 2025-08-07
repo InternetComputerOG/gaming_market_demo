@@ -1265,16 +1265,16 @@ def run_user_tests():
 
         # Test actions in sequence
         # 1. Tester1 market buy 10 YES Outcome 1
-        place_market_order(driver1, wait1, 1, "YES", "Buy", 10)
+        place_market_order(driver1, wait1, 1, "YES", "Buy", 100)
 
         # 2. Tester2 market sell 5 YES Outcome 1
         place_market_order(driver2, wait2, 1, "YES", "Sell", 5)
 
         # 3. Tester1 market buy 10 NO Outcome 1
-        place_market_order(driver1, wait1, 1, "NO", "Buy", 10)
+        place_market_order(driver1, wait1, 1, "NO", "Buy", 50)
 
         # 4. Tester2 market sell 5 NO Outcome 1
-        place_market_order(driver2, wait2, 1, "NO", "Sell", 5)
+        place_market_order(driver2, wait2, 1, "NO", "Sell", 15)
 
         # 5. Tester1 limit buy 20 YES Outcome 1 at 0.60 af_opt_in=True
         place_limit_order(driver1, wait1, 1, "YES", "Buy", 20, 0.60, True)
@@ -1283,7 +1283,7 @@ def run_user_tests():
         place_limit_order(driver2, wait2, 1, "YES", "Sell", 15, 0.65)
 
         # 7. Tester1 market sell 10 YES Outcome 1
-        place_market_order(driver1, wait1, 1, "YES", "Sell", 10)
+        place_market_order(driver1, wait1, 1, "YES", "Sell", 40)
 
         # 8. Tester2 limit buy 20 NO Outcome 1 at 0.40 af_opt_in=True
         place_limit_order(driver2, wait2, 1, "NO", "Buy", 20, 0.40, True)
@@ -1292,7 +1292,7 @@ def run_user_tests():
         place_limit_order(driver1, wait1, 1, "NO", "Sell", 15, 0.45)
 
         # 10. Tester2 market buy 10 NO Outcome 1
-        place_market_order(driver2, wait2, 1, "NO", "Buy", 10)
+        place_market_order(driver2, wait2, 1, "NO", "Buy", 60)
 
         # 11. Tester1 limit buy 30 YES Outcome 2 at 0.55
         place_limit_order(driver1, wait1, 2, "YES", "Buy", 30, 0.55)

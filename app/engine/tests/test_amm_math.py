@@ -105,7 +105,8 @@ def test_get_new_p_no_after_sell(default_binary, default_params, f_i):
 
 def test_buy_cost_yes(default_binary, default_params, f_i):
     delta = Decimal('100')
-    cost = buy_cost_yes(default_binary, delta, default_params, f_i)
+    # Use None for dyn_params to use static parameters
+    cost = buy_cost_yes(default_binary, delta, default_params, f_i, None)
     p = get_effective_p_yes(default_binary)
     q = default_binary['q_yes'] + default_binary['virtual_yes']
     L = default_binary['L']
@@ -129,31 +130,31 @@ def test_buy_cost_yes(default_binary, default_params, f_i):
 
 def test_buy_cost_yes_zero_delta(default_binary, default_params, f_i):
     delta = Decimal('0')
-    cost = buy_cost_yes(default_binary, delta, default_params, f_i)
+    cost = buy_cost_yes(default_binary, delta, default_params, f_i, None)
     assert cost == Decimal('0')
 
 def test_buy_cost_yes_penalty(default_binary, default_params, f_i):
     delta = Decimal('10000')  # Large to trigger p' > p_max
-    cost = buy_cost_yes(default_binary, delta, default_params, f_i)
+    cost = buy_cost_yes(default_binary, delta, default_params, f_i, None)
     # Test that cost is positive and reasonable for large delta
     assert cost > Decimal('0')
     # Test that large delta results in higher cost than small delta
-    small_cost = buy_cost_yes(default_binary, Decimal('100'), default_params, f_i)
+    small_cost = buy_cost_yes(default_binary, Decimal('100'), default_params, f_i, None)
     assert cost > small_cost
 
 def test_sell_received_yes(default_binary, default_params, f_i):
     delta = Decimal('100')
-    received = sell_received_yes(default_binary, delta, default_params, f_i)
+    received = sell_received_yes(default_binary, delta, default_params, f_i, None)
     assert received > Decimal('0')
 
 def test_buy_cost_no(default_binary, default_params, f_i):
     delta = Decimal('100')
-    cost = buy_cost_no(default_binary, delta, default_params, f_i)
+    cost = buy_cost_no(default_binary, delta, default_params, f_i, None)
     assert cost > Decimal('0')
 
 def test_sell_received_no(default_binary, default_params, f_i):
     delta = Decimal('100')
-    received = sell_received_no(default_binary, delta, default_params, f_i)
+    received = sell_received_no(default_binary, delta, default_params, f_i, None)
     assert received > Decimal('0')
 
 def test_validate_size_negative():
@@ -162,7 +163,7 @@ def test_validate_size_negative():
 
 def test_invariant_preservation_buy(default_binary, default_params, f_i):
     delta = Decimal('1000')
-    cost = buy_cost_yes(default_binary, delta, default_params, f_i)
+    cost = buy_cost_yes(default_binary, delta, default_params, f_i, None)
     new_q_eff = default_binary['q_yes'] + default_binary['virtual_yes'] + delta
     new_L = default_binary['L'] + f_i * cost
     assert new_q_eff < new_L

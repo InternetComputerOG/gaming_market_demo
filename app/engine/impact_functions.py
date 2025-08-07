@@ -55,7 +55,9 @@ def apply_own_impact(state: EngineState, i: int, X: Decimal, is_buy: bool, is_ye
     binary = get_binary(state, i)
     sign = Decimal(1) if is_buy else Decimal(-1)
     delta_v = sign * f_i * X
-    binary['V'] = float(Decimal(binary['V']) + delta_v)
+    new_v = Decimal(binary['V']) + delta_v
+    # Clamp V to prevent negative values (fixes audit issue #3)
+    binary['V'] = float(max(new_v, Decimal('0')))
     # Update subsidy and L
     update_subsidies(state, params)
 
@@ -70,7 +72,9 @@ def apply_cross_impacts(state: EngineState, i: int, X: Decimal, is_buy: bool, ze
     active_binaries = sorted([b for b in state['binaries'] if b['active'] and b['outcome_i'] != i],
                              key=lambda b: b['outcome_i'])
     for binary in active_binaries:
-        binary['V'] = float(Decimal(binary['V']) + delta_v_cross)
+        new_v_cross = Decimal(binary['V']) + delta_v_cross
+        # Clamp V to prevent negative values (fixes audit issue #3)
+        binary['V'] = float(max(new_v_cross, Decimal('0')))
     # Update subsidies for all (since cross affects multiple)
     update_subsidies(state, params)
 

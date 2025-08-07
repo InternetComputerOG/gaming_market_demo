@@ -109,7 +109,7 @@ def test_binary_search_max_delta_buy_yes(default_params: EngineParams, sample_bi
     delta = binary_search_max_delta(pool_tick, True, True, sample_binary, default_params, f_i, max_high)
     assert delta > Decimal('0')
     assert validate_size(delta) is None
-    cost = buy_cost_yes(sample_binary, delta, default_params, f_i)
+    cost = buy_cost_yes(sample_binary, delta, default_params, f_i, None)
     # Simulate the price after the trade
     from app.engine.amm_math import get_new_p_yes_after_buy
     p_after = get_new_p_yes_after_buy(sample_binary, delta, cost, f_i)
@@ -121,7 +121,7 @@ def test_binary_search_max_delta_sell_yes(default_params: EngineParams, sample_b
     max_high = Decimal('10000')
     delta = binary_search_max_delta(pool_tick, False, True, sample_binary, default_params, f_i, max_high)
     assert delta > Decimal('0')
-    received = sell_received_yes(sample_binary, delta, default_params, f_i)
+    received = sell_received_yes(sample_binary, delta, default_params, f_i, None)
     # Simulate the price after the trade
     from app.engine.amm_math import get_new_p_yes_after_sell
     p_after = get_new_p_yes_after_sell(sample_binary, delta, received, f_i)

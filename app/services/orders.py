@@ -100,11 +100,19 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
         else:
             # CRITICAL FIX: For market buy orders, validate and deduct gas fee immediately
             current_p = Decimal(get_p_yes(binary) if yes_no == 'YES' else get_p_no(binary))
+            
+            # Compute dynamic parameters for proper AMM integration
+            from app.engine.impact_functions import compute_dynamic_params
+            current_time = get_current_ms()
+            start_ts_ms = params.get('start_ts_ms', 0)
+            current_time_sec = int((current_time - start_ts_ms) / 1000)
+            dyn_params = compute_dynamic_params(params, current_time_sec)
+            
             try:
                 if yes_no == 'YES':
-                    est_cost = buy_cost_yes(binary, size, params)
+                    est_cost = buy_cost_yes(binary, size, params, Decimal('1.0'), dyn_params)  # f_i=1.0 for estimation
                 else:
-                    est_cost = buy_cost_no(binary, size, params)
+                    est_cost = buy_cost_no(binary, size, params, Decimal('1.0'), dyn_params)  # f_i=1.0 for estimation
                 # Add conservative slippage buffer and gas fee
                 total_cost = est_cost * Decimal('1.1') + gas_fee  # 10% slippage buffer
                 
@@ -264,6 +272,12 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
     params: EngineParams = config['params']
     current_time = get_current_ms()
     
+    # Compute dynamic parameters for proper AMM integration
+    from app.engine.impact_functions import compute_dynamic_params
+    start_ts_ms = params.get('start_ts_ms', 0)
+    current_time_sec = int((current_time - start_ts_ms) / 1000)  # Convert to seconds
+    dyn_params = compute_dynamic_params(params, current_time_sec)
+    
     # Get current price for slippage calculation
     binary = state['binaries'][outcome_i]
     from app.engine.state import get_p_yes, get_p_no
@@ -296,16 +310,18 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
             # Per TDD "no rejections" principle, estimate using pure AMM cost
             try:
                 from app.engine.amm_math import buy_cost_yes, buy_cost_no, sell_received_yes, sell_received_no
+                # Use f_i=1.0 for fallback estimation and compute dynamic parameters
+                f_i_fallback = Decimal('1.0')
                 if is_buy:
                     if yes_no == 'YES':
-                        fallback_cost = buy_cost_yes(binary, size, params)
+                        fallback_cost = buy_cost_yes(binary, size, params, f_i_fallback, dyn_params)
                     else:
-                        fallback_cost = buy_cost_no(binary, size, params)
+                        fallback_cost = buy_cost_no(binary, size, params, f_i_fallback, dyn_params)
                 else:
                     if yes_no == 'YES':
-                        fallback_cost = sell_received_yes(binary, size, params)
+                        fallback_cost = sell_received_yes(binary, size, params, f_i_fallback, dyn_params)
                     else:
-                        fallback_cost = sell_received_no(binary, size, params)
+                        fallback_cost = sell_received_no(binary, size, params, f_i_fallback, dyn_params)
                 
                 # Add gas fee and calculate slippage from AMM price
                 gas_fee = Decimal(str(params.get('gas_fee', 0)))
@@ -411,18 +427,20 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
     except Exception as e:
         # Fallback to simple estimation if simulation fails
         try:
+            # Use f_i=1.0 for estimation since we don't have full engine context
+            f_i_est = Decimal('1.0')
             if is_buy:
                 if yes_no == 'YES':
-                    est_cost = buy_cost_yes(binary, size, params)
+                    est_cost = buy_cost_yes(binary, size, params, f_i_est, dyn_params)
                 else:
-                    est_cost = buy_cost_no(binary, size, params)
+                    est_cost = buy_cost_no(binary, size, params, f_i_est, dyn_params)
                 effective_price = est_cost / size
                 slippage = safe_divide(effective_price - current_p, current_p)
             else:
                 if yes_no == 'YES':
-                    est_received = sell_received_yes(binary, size, params)
+                    est_received = sell_received_yes(binary, size, params, f_i_est, dyn_params)
                 else:
-                    est_received = sell_received_no(binary, size, params)
+                    est_received = sell_received_no(binary, size, params, f_i_est, dyn_params)
                 effective_price = est_received / size
                 slippage = safe_divide(current_p - effective_price, current_p)
             
@@ -453,14 +471,18 @@ def estimate_slippage(outcome_i: int, yes_no: str, size: Decimal, is_buy: bool, 
             conservative_price = current_p * (Decimal('1') + conservative_slippage) if is_buy else current_p * (Decimal('1') - conservative_slippage)
             conservative_cost = size * conservative_price
             
+            # Include AMM fee in conservative estimate (fixes audit issue #1)
+            conservative_fee = Decimal(params.get('f', 0.01)) * size * conservative_price
+            conservative_total = conservative_cost + conservative_fee
+            
             return {
                 'estimated_slippage': float(conservative_slippage),
                 'would_reject': False,  # TDD: no rejections, always provide estimate
-                'est_cost': float(conservative_cost),
+                'est_cost': float(conservative_total),
                 'breakdown': {
                     'lob_fill': Decimal('0'),
                     'amm_fill': size,
-                    'total_fee': Decimal('0'),
+                    'total_fee': conservative_fee,
                     'effective_price': conservative_price
                 },
                 'error': f'Using conservative estimate: {str(fallback_error)}'

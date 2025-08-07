@@ -239,14 +239,14 @@ def apply_orders(
         current_p = get_effective_p_yes(binary) if is_yes else get_effective_p_no(binary)
         if is_yes:
             if is_buy:
-                X = buy_cost_yes(binary, remaining, params_dyn, f_i)
+                X = buy_cost_yes(binary, remaining, params_dyn, f_i, dyn_params)
             else:
-                X = sell_received_yes(binary, remaining, params, f_i, params_dyn)
+                X = sell_received_yes(binary, remaining, params_dyn, f_i, dyn_params)
         else:
             if is_buy:
-                X = buy_cost_no(binary, remaining, params_dyn, f_i)
+                X = buy_cost_no(binary, remaining, params_dyn, f_i, dyn_params)
             else:
-                X = sell_received_no(binary, remaining, params, f_i, params_dyn)
+                X = sell_received_no(binary, remaining, params_dyn, f_i, dyn_params)
         # Compute new price after impact (penalty already applied in AMM cost functions)
         new_p_yes, new_p_no = get_new_prices_after_impact(binary, remaining, X, f_i, is_buy, is_yes)
         effective_p = new_p_yes if is_yes else new_p_no
@@ -278,6 +278,10 @@ def apply_orders(
             'price_no': None
         }
         fills.append(fill)
+        
+        # Add AMM fee to seigniorage for proper fee tracking (fixes audit issue #1)
+        binary['seigniorage'] = float(Decimal(binary['seigniorage']) + fee)
+        
         # Update token supplies to reflect the trade
         binary = get_binary(state, i)
         if is_yes:

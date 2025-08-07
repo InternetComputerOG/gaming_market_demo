@@ -87,7 +87,7 @@ def get_binary(state: EngineState, outcome_i: int) -> BinaryState:
 
 def get_p_yes(binary: BinaryState) -> float:
     """
-    Compute p_yes for a binary.
+    Compute p_yes for a binary with price clamping to prevent p>1 violations.
     """
     L = Decimal(str(binary['L']))
     if L <= 0:
@@ -96,18 +96,22 @@ def get_p_yes(binary: BinaryState) -> float:
     q_yes = Decimal(str(binary['q_yes']))
     virtual_yes = Decimal(str(binary.get('virtual_yes', 0.0)))  # Default to 0 if missing
     
-    return float((q_yes + virtual_yes) / L)
+    p_yes = (q_yes + virtual_yes) / L
+    # Clamp to prevent p>1 violations per audit findings
+    return float(min(p_yes, Decimal('0.99')))
 
 def get_p_no(binary: BinaryState) -> float:
     """
-    Compute p_no for a binary.
+    Compute p_no for a binary with price clamping.
     """
     L = Decimal(str(binary['L']))
     if L <= 0:
         return 0.0  # Handle division by zero case
     
     q_no = Decimal(str(binary['q_no']))
-    return float(q_no / L)
+    p_no = q_no / L
+    # Clamp to prevent price violations per audit findings
+    return float(min(p_no, Decimal('0.99')))
 
 def update_subsidies(state: EngineState, params: Dict[str, Any]) -> None:
     """
