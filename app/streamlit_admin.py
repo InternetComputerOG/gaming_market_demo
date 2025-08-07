@@ -17,19 +17,15 @@ from app.scripts.generate_graph import generate_graph
 from app.runner.batch_runner import start_batch_runner
 from app.runner.timer_service import start_timer_service
 
-# Load environment variables
-env = {}
+# Load environment variables using centralized config system
 try:
-    with open('.env', 'r') as f:
-        for line in f:
-            if line.strip() and not line.startswith('#'):
-                key, value = line.strip().split('=', 1)
-                env[key] = value
-except FileNotFoundError:
-    st.error(".env file not found.")
+    from app.config import load_env
+    env = load_env()
+    ADMIN_PASSWORD = env.get('ADMIN_PASSWORD')
+except Exception as e:
+    st.error(f"Configuration error: {e}")
+    st.error("Please ensure environment variables are set or configure Streamlit secrets.")
     st.stop()
-
-ADMIN_PASSWORD = env.get('ADMIN_PASSWORD')
 
 def get_client() -> Client:
     return get_supabase_client()
