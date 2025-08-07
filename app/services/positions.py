@@ -56,6 +56,8 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
         size = Decimal(str(fill['size']))  # Number of tokens traded
         fee = Decimal(str(fill['fee']))  # Total trading fee
         
+
+        
         validate_size(float(size))  # Ensure positive size
         
         # Calculate transaction amounts
@@ -115,14 +117,16 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
         if buy_user_id not in SYSTEM_USER_IDS:
             buyer_data = db.table('users').select('trade_count').eq('user_id', buy_user_id).execute().data
             if buyer_data:
-                buyer_trade_count = buyer_data[0]['trade_count'] + 1
+                current_count = buyer_data[0]['trade_count']
+                buyer_trade_count = int(current_count) + 1  # Ensure int conversion
                 db.table('users').update({'trade_count': buyer_trade_count}).eq('user_id', buy_user_id).execute()
         
         # Update seller trade count
         if sell_user_id not in SYSTEM_USER_IDS:
             seller_data = db.table('users').select('trade_count').eq('user_id', sell_user_id).execute().data
             if seller_data:
-                seller_trade_count = seller_data[0]['trade_count'] + 1
+                current_count = seller_data[0]['trade_count']
+                seller_trade_count = int(current_count) + 1  # Ensure int conversion
                 db.table('users').update({'trade_count': seller_trade_count}).eq('user_id', sell_user_id).execute()
             
     except Exception as e:

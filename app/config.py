@@ -108,7 +108,7 @@ def get_default_engine_params() -> EngineParams:
         interpolation_mode='continue',
         res_schedule=[],
         total_duration=900,
-        final_winner=0,
+        final_winner=2,
         res_offsets=[],
         freeze_durs=[],
         elim_outcomes=0,

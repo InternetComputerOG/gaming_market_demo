@@ -55,18 +55,19 @@ def refund_collateral_for_rejected_order(order_details: Dict[str, Any], rejectio
     """
     try:
         user_id = order_details['user_id']
-        order_type = order_details['order_type']
-        side = order_details['side']
+        order_type = order_details['type']  # CRITICAL FIX: Use 'type' field from database schema
+        is_buy = order_details['is_buy']  # CRITICAL FIX: Use 'is_buy' field from database schema
         size = float(order_details['size'])
         limit_price = order_details.get('limit_price')
-        outcome = order_details['outcome']
+        outcome_i = order_details['outcome_i']  # CRITICAL FIX: Use outcome_i from schema
+        yes_no = order_details['yes_no']  # CRITICAL FIX: Use yes_no from schema
         
         # Only refund collateral for LIMIT orders (market orders only deduct gas)
         if order_type != 'LIMIT':
             logger.info(f"No refund needed for {order_type} order {order_details['order_id']}")
             return
             
-        if side == 'BUY' and limit_price is not None:
+        if is_buy and limit_price is not None:
             # Refund USDC collateral: size * limit_price
             refund_amount = size * float(limit_price)
             current_balance = fetch_user_balance(user_id)
@@ -74,13 +75,11 @@ def refund_collateral_for_rejected_order(order_details: Dict[str, Any], rejectio
             update_user_balance(user_id, new_balance)
             logger.info(f"Refunded ${refund_amount:.2f} USDC to user {user_id} for rejected BUY order")
             
-        elif side == 'SELL':
-            # Refund token collateral: size tokens
-            yes_no = outcome  # outcome is already 'YES' or 'NO'
-            current_tokens = fetch_user_position(user_id, order_details['outcome_i'], yes_no)
-            new_tokens = current_tokens + size
-            update_user_position(user_id, order_details['outcome_i'], yes_no, new_tokens)
-            logger.info(f"Refunded {size} {outcome} tokens to user {user_id} for rejected SELL order")
+        elif not is_buy:
+            # CRITICAL FIX: No token refund needed for limit sell orders since tokens are no longer
+            # deducted at submission time (only at execution). This fixes the double deduction bug.
+            # Gas fees are still not refunded (already deducted and non-refundable per TDD)
+            logger.info(f"No token refund needed for rejected SELL order {order_details['order_id']} - tokens not deducted at submission")
             
     except Exception as e:
         logger.error(f"Error refunding collateral for order {order_details.get('order_id', 'unknown')}: {e}")
@@ -97,6 +96,28 @@ def convert_decimals_to_floats(obj):
         return tuple(convert_decimals_to_floats(item) for item in obj)
     else:
         return obj
+
+def convert_engine_params_to_decimals(params: EngineParams) -> EngineParams:
+    """Convert all numeric EngineParams from float to Decimal to maintain type consistency in engine.
+    
+    This fixes the critical type mismatch issue where engine logic expects Decimal types
+    but EngineParams are defined as floats, causing 'unsupported operand type(s) for *: 
+    'decimal.Decimal' and 'float'' errors.
+    """
+    decimal_params = params.copy()
+    
+    # Convert all float parameters to Decimal
+    float_param_keys = [
+        'z', 'gamma', 'q0', 'f', 'p_max', 'p_min', 'eta', 'tick_size', 'f_match', 
+        'sigma', 'af_cap_frac', 'af_max_surplus', 'mu_start', 'mu_end', 'nu_start', 
+        'nu_end', 'kappa_start', 'kappa_end', 'zeta_start', 'zeta_end', 'starting_balance', 'gas_fee'
+    ]
+    
+    for key in float_param_keys:
+        if key in decimal_params and isinstance(decimal_params[key], (int, float)):
+            decimal_params[key] = Decimal(str(decimal_params[key]))
+    
+    return decimal_params
 
 def get_status_and_config() -> Dict[str, Any]:
     config = load_config()
@@ -188,6 +209,11 @@ def run_tick():
         state: EngineState = fetch_engine_state()
         params: EngineParams = config['params']  # TypedDict
         
+        # CRITICAL FIX: Convert all EngineParams to Decimal types to prevent type mismatch errors
+        # This fixes the "unsupported operand type(s) for *: 'decimal.Decimal' and 'float'" error
+        decimal_params = convert_engine_params_to_decimals(params)
+        logger.debug(f"Tick {tick_id}: Converted EngineParams to Decimal types for engine compatibility")
+        
         # CRITICAL FIX: Validate parameters before engine calls per Implementation Plan Section 11
         try:
             # Validate core parameters that could cause engine crashes
@@ -217,7 +243,7 @@ def run_tick():
         
         # Apply orders through engine
         if new_orders:  # Only process if we have valid orders
-            fills, new_state, events = apply_orders(state, new_orders, params, int(current_time_sec))
+            fills, new_state, events = apply_orders(state, new_orders, decimal_params, int(current_time_sec))
         else:
             # No valid orders to process
             fills, new_state, events = [], state, []
@@ -305,7 +331,7 @@ def run_tick():
 
             # Compute summary and create tick
             summary = compute_summary(new_state, fills)
-            create_tick(new_state, fills, tick_id, current_ms, params)  # Pass params for proper f_match handling
+            create_tick(new_state, fills, tick_id, current_ms, decimal_params)  # Pass decimal_params for proper f_match handling
 
             insert_events(events)
 

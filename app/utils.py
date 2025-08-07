@@ -103,7 +103,11 @@ def solve_quadratic(a: Decimal, b: Decimal, c: Decimal) -> Decimal:
                     positive_real_roots.append(float(np.real(root)))
             
             if positive_real_roots:
-                return Decimal(str(min(positive_real_roots)))
+                # Ensure proper Decimal conversion - convert float to string with proper formatting
+                min_root = min(positive_real_roots)
+                # Format to avoid scientific notation which can cause Decimal conversion issues
+                root_str = f"{min_root:.18f}"
+                return Decimal(root_str)
             else:
                 # Per TDD: No rejections - return small positive value
                 return Decimal('0.001')

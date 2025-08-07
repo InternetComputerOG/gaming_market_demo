@@ -134,28 +134,18 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
         validate_balance_sell(user_tokens, size)
         
         if order_type == 'LIMIT':
-            # CRITICAL FIX: For limit sell orders, commit tokens + deduct gas fee per TDD Section 4.1
-            # Validate sufficient tokens BEFORE attempting to deduct
+            # CRITICAL FIX: For limit sell orders, validate tokens but DON'T deduct them yet
+            # Tokens will be deducted during actual execution in update_position_from_fill()
+            # This eliminates the double deduction bug that was preventing position updates
             if user_tokens < size:
-                raise ValueError(f"Insufficient tokens for limit sell commitment. Required: {size} tokens, Available: {user_tokens} tokens")
+                raise ValueError(f"Insufficient tokens for limit sell order. Required: {size} tokens, Available: {user_tokens} tokens")
             if user_balance < gas_fee:
                 raise ValueError(f"Insufficient balance for gas fee. Required: {gas_fee:.4f} USDC")
             
-            # Deduct gas fee from balance
+            # Only deduct gas fee from balance (tokens deducted at execution time)
             new_balance = float(user_balance - gas_fee)
             update_user_balance(user_id, new_balance)
-            
-            # Deduct committed tokens from position - only after validation passes
-            from app.services.positions import update_user_position
-            # Double-check tokens are still sufficient (race condition protection)
-            current_tokens = Decimal(fetch_user_position(user_id, outcome_i, yes_no))
-            if current_tokens < size:
-                # Refund gas fee if token validation fails
-                update_user_balance(user_id, float(user_balance))
-                raise ValueError(f"Insufficient tokens after validation. Required: {size} tokens, Available: {current_tokens} tokens")
-            
-            update_user_position(user_id, outcome_i, yes_no, -float(size))
-            logger.info(f"Committed {size} {yes_no} tokens + {gas_fee:.4f} USDC gas fee for limit sell order")
+            logger.info(f"Validated {size} {yes_no} tokens available + deducted {gas_fee:.4f} USDC gas fee for limit sell order")
         else:
             # For market sell orders: only deduct gas fee
             if user_balance < gas_fee:

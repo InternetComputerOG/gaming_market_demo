@@ -159,7 +159,7 @@ def update_pool_and_get_deltas(pool: Dict[str, any], delta: Decimal, charge: Dec
     return position_deltas, balance_deltas
 
 def apply_rebates(surplus: Decimal, sigma: Decimal, original_volume: Decimal, shares: Dict[str, Decimal], balance_deltas: Dict[str, Decimal]) -> None:
-    rebate_share = (Decimal('1') - sigma) * surplus
+    rebate_share = (Decimal('1') - Decimal(str(sigma))) * surplus
     if rebate_share <= Decimal('0'):
         return
     for user_id, share in shares.items():
@@ -200,7 +200,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             pool = pools[tick_int]
             if pool['volume'] <= 0:
                 continue
-            pool_tick = price_value(Decimal(tick_int) * params['tick_size'])
+            pool_tick = price_value(Decimal(tick_int) * Decimal(str(params['tick_size'])))
             current_p = get_p_yes(binary) if yes_no == 'YES' else get_p_no(binary)
             print(f"DEBUG: tick_int={tick_int}, pool_tick={pool_tick}, current_p={current_p}, is_increase={is_increase}")
             if (is_increase and pool_tick <= current_p) or (not is_increase and pool_tick >= current_p):
@@ -243,11 +243,19 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 continue
             if is_increase:
                 X = buy_cost_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j, dyn_params)
+                # Ensure X is Decimal type
+                if not isinstance(X, Decimal):
+                    print(f"WARNING: Initial X is not Decimal type: {type(X)}, value: {X}")
+                    X = Decimal(str(X)) if X is not None else Decimal('0')
                 charge = usdc_amount(pool_tick * delta)
                 surplus = charge - X  # For buys: what we charge minus what it costs
                 print(f"DEBUG: Buy - X={X}, charge={charge}, surplus={surplus}")
             else:
                 X = sell_received_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j, dyn_params)
+                # Ensure X is Decimal type
+                if not isinstance(X, Decimal):
+                    print(f"WARNING: Initial X is not Decimal type: {type(X)}, value: {X}")
+                    X = Decimal(str(X)) if X is not None else Decimal('0')
                 charge = usdc_amount(pool_tick * delta)  # What we pay to pool holders
                 surplus = X - charge  # For sells: what we receive minus what we pay
                 print(f"DEBUG: Sell - X={X}, charge={charge}, surplus={surplus}")
@@ -257,17 +265,29 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
             
             # Apply caps per TDD: cap = af_cap_frac * diverted_collateral (ζ * X)
             # Use current dynamic zeta for proper scaling
-            cap_delta = (params['af_cap_frac'] * zeta * abs(X)) / pool_tick
+            # Ensure X is Decimal type to prevent abs() string error
+            if not isinstance(X, Decimal):
+                print(f"WARNING: X is not Decimal type: {type(X)}, value: {X}")
+                X = Decimal(str(X)) if X is not None else Decimal('0')
+            cap_delta = (Decimal(str(params['af_cap_frac'])) * zeta * abs(X)) / pool_tick
             print(f"DEBUG: cap_delta = {cap_delta}, delta = {delta}, af_cap_frac = {params['af_cap_frac']}, diversion = {diversion}")
             if delta > cap_delta:
                 delta = cap_delta
                 # Recalculate with capped delta
                 if is_increase:
                     X = buy_cost_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else buy_cost_no(binary, delta, params, f_j, dyn_params)
+                    # Ensure X is Decimal type
+                    if not isinstance(X, Decimal):
+                        print(f"WARNING: Recalculated X is not Decimal type: {type(X)}, value: {X}")
+                        X = Decimal(str(X)) if X is not None else Decimal('0')
                     charge = pool_tick * delta
                     surplus = charge - X
                 else:
                     X = sell_received_yes(binary, delta, params, f_j, dyn_params) if yes_no == 'YES' else sell_received_no(binary, delta, params, f_j, dyn_params)
+                    # Ensure X is Decimal type
+                    if not isinstance(X, Decimal):
+                        print(f"WARNING: Recalculated X is not Decimal type: {type(X)}, value: {X}")
+                        X = Decimal(str(X)) if X is not None else Decimal('0')
                     charge = pool_tick * delta
                     surplus = X - charge
             
@@ -287,7 +307,7 @@ def auto_fill(state: EngineState, j: int, diversion: Decimal, params: EnginePara
                 binary[token_field] = float(Decimal(str(binary[token_field])) + delta)
             else:
                 binary[token_field] = float(Decimal(str(binary[token_field])) - delta)
-            system_surplus = params['sigma'] * surplus
+            system_surplus = Decimal(str(params['sigma'])) * surplus
             binary['V'] += float(system_surplus)
             update_subsidies(state, params)
             

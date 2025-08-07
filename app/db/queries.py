@@ -124,33 +124,45 @@ def fetch_users() -> List[Dict[str, Any]]:
     return result.data
 
 # Positions queries
-def update_position(user_id: str, binary_id: int, q_yes: float, q_no: float) -> None:
-    """Legacy function - updates both YES and NO positions for a user"""
+def update_position(user_id: str, outcome_i: int, yes_no: str, tokens: float, trade_count: int) -> None:
+    """Legacy function for updating positions with trade count - uses same upsert approach as update_user_position"""
     db = get_db()
-    # Update YES position
-    db.table('positions').upsert({
-        'user_id': user_id,
-        'outcome_i': binary_id,
-        'yes_no': 'YES',
-        'tokens': q_yes
-    }).execute()
-    # Update NO position
-    db.table('positions').upsert({
-        'user_id': user_id,
-        'outcome_i': binary_id,
-        'yes_no': 'NO', 
-        'tokens': q_no
-    }).execute()
+    
+    try:
+        # Use same upsert approach as update_user_position for consistency
+        db.table('positions').upsert({
+            'user_id': user_id,
+            'outcome_i': outcome_i,
+            'yes_no': yes_no,
+            'tokens': tokens,
+            'trade_count': trade_count,
+            'updated_at': 'now()'
+        }, on_conflict='user_id,outcome_i,yes_no').execute()
+        
+    except Exception as e:
+        print(f"Error in update_position: {e}")
+        raise e
 
 def update_user_position(user_id: str, outcome_i: int, yes_no: str, tokens: float) -> None:
-    """Update a single position entry for a user"""
+    """Update a single position entry for a user, ensuring only one record per (user_id, outcome_i, yes_no)"""
     db = get_db()
-    db.table('positions').upsert({
-        'user_id': user_id,
-        'outcome_i': outcome_i,
-        'yes_no': yes_no,
-        'tokens': tokens
-    }).execute()
+    
+    # Now that the unique constraint has been applied to the database,
+    # we can use proper upsert with conflict resolution
+    try:
+        # Use upsert with the unique constraint columns as conflict target
+        # This ensures atomic operation and prevents duplicate records
+        db.table('positions').upsert({
+            'user_id': user_id,
+            'outcome_i': outcome_i,
+            'yes_no': yes_no,
+            'tokens': tokens,
+            'updated_at': 'now()'
+        }, on_conflict='user_id,outcome_i,yes_no').execute()
+        
+    except Exception as e:
+        print(f"Error in update_user_position: {e}")
+        raise e
 
 def fetch_user_position(user_id: str, outcome_i: int, yes_no: str) -> float:
     """Fetch current token amount for a specific user position"""

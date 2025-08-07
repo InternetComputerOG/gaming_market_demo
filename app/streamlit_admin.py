@@ -480,7 +480,7 @@ def run_admin_app():
                 params['p_min'] = st.number_input("Minimum Price (p_min)", min_value=0.0, max_value=0.5, value=params['p_min'], format="%.4f")
 
             with col2:
-                params['eta'] = st.number_input("Penalty Exponent (η)", min_value=1.0, value=params['eta'])
+                params['eta'] = st.number_input("Penalty Exponent (η)", min_value=1.0, value=float(params['eta']))
                 params['tick_size'] = st.number_input("Tick Granularity", min_value=0.001, value=params['tick_size'], format="%.4f")
                 params['f_match'] = st.number_input("Match Fee Fraction (f_match)", min_value=0.0, max_value=0.02, value=params['f_match'], format="%.4f")
                 params['sigma'] = st.number_input("Seigniorage Share (σ)", min_value=0.0, max_value=1.0, value=params['sigma'], format="%.4f")
