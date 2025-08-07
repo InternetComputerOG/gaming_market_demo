@@ -18,6 +18,11 @@ from app.db.queries import (
     load_config,
     insert_tick as db_insert_tick,
     update_metrics,
+    fetch_order_by_id, 
+    fetch_user_balance, 
+    update_user_balance, 
+    fetch_user_position, 
+    update_user_position
 )
 from app.engine.orders import apply_orders, Fill, Order
 from app.engine.state import EngineState
@@ -42,6 +47,43 @@ _batch_runner_stats = {
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def refund_collateral_for_rejected_order(order_details: Dict[str, Any], rejection_reason: str) -> None:
+    """
+    Refund collateral for rejected limit orders.
+    Gas fees are NOT refunded (already deducted on submission).
+    """
+    try:
+        user_id = order_details['user_id']
+        order_type = order_details['order_type']
+        side = order_details['side']
+        size = float(order_details['size'])
+        limit_price = order_details.get('limit_price')
+        outcome = order_details['outcome']
+        
+        # Only refund collateral for LIMIT orders (market orders only deduct gas)
+        if order_type != 'LIMIT':
+            logger.info(f"No refund needed for {order_type} order {order_details['order_id']}")
+            return
+            
+        if side == 'BUY' and limit_price is not None:
+            # Refund USDC collateral: size * limit_price
+            refund_amount = size * float(limit_price)
+            current_balance = fetch_user_balance(user_id)
+            new_balance = float(current_balance) + refund_amount
+            update_user_balance(user_id, new_balance)
+            logger.info(f"Refunded ${refund_amount:.2f} USDC to user {user_id} for rejected BUY order")
+            
+        elif side == 'SELL':
+            # Refund token collateral: size tokens
+            yes_no = outcome  # outcome is already 'YES' or 'NO'
+            current_tokens = fetch_user_position(user_id, order_details['outcome_i'], yes_no)
+            new_tokens = current_tokens + size
+            update_user_position(user_id, order_details['outcome_i'], yes_no, new_tokens)
+            logger.info(f"Refunded {size} {outcome} tokens to user {user_id} for rejected SELL order")
+            
+    except Exception as e:
+        logger.error(f"Error refunding collateral for order {order_details.get('order_id', 'unknown')}: {e}")
 
 def convert_decimals_to_floats(obj):
     """Recursively convert Decimal objects to floats for JSON serialization."""
@@ -217,10 +259,19 @@ def run_tick():
                     }
                     status = status_mapping.get(event['type'], 'OPEN')
                     
+                    # Handle collateral refunds for rejected orders
+                    rejection_reason = None
+                    if event['type'] == 'ORDER_REJECTED':
+                        order_details = fetch_order_by_id(order_id)
+                        if order_details:
+                            rejection_reason = payload.get('reason', 'Unknown rejection reason')
+                            refund_collateral_for_rejected_order(order_details, rejection_reason)
+                            logger.info(f"Processed rejection refund for order {order_id}: {rejection_reason}")
+                    
                     filled_qty = payload.get('filled_qty')
                     # Convert Decimal to float if needed
                     filled_qty = convert_decimals_to_floats(filled_qty)
-                    update_order_status(order_id, status, filled_qty)
+                    update_order_status(order_id, status, filled_qty, rejection_reason)
                     orders_updated += 1
             
             if orders_updated > 0:

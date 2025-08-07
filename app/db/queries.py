@@ -206,11 +206,19 @@ def fetch_user_orders(user_id: str, status: Optional[str] = None) -> List[Dict[s
         query = query.eq('status', status)
     return query.execute().data
 
-def update_order_status(order_id: str, status: str, filled_qty: Optional[float] = None) -> None:
+def fetch_order_by_id(order_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single order by order_id for refund processing"""
+    db = get_db()
+    result = db.table('orders').select('*').eq('order_id', order_id).execute()
+    return result.data[0] if result.data else None
+
+def update_order_status(order_id: str, status: str, filled_qty: Optional[float] = None, rejection_reason: Optional[str] = None) -> None:
     db = get_db()
     update_data = {'status': status}
     if filled_qty is not None:
         update_data['filled_qty'] = filled_qty
+    if rejection_reason is not None:
+        update_data['rejection_reason'] = rejection_reason
     db.table('orders').update(update_data).eq('order_id', order_id).execute()
 
 # LOB pools queries

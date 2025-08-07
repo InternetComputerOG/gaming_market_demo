@@ -34,6 +34,39 @@ ADMIN_PASSWORD = env.get('ADMIN_PASSWORD')
 def get_client() -> Client:
     return get_supabase_client()
 
+def get_rejection_statistics() -> Dict[str, Any]:
+    """Get order rejection statistics for admin monitoring"""
+    try:
+        client = get_client()
+        
+        # Get total order counts by status
+        total_orders_result = client.table('orders').select('status', count='exact').execute()
+        total_orders = total_orders_result.count if hasattr(total_orders_result, 'count') else len(total_orders_result.data)
+        
+        rejected_orders_result = client.table('orders').select('*', count='exact').eq('status', 'REJECTED').execute()
+        rejected_count = rejected_orders_result.count if hasattr(rejected_orders_result, 'count') else len(rejected_orders_result.data)
+        
+        # Calculate rejection rate
+        rejection_rate = (rejected_count / total_orders * 100) if total_orders > 0 else 0
+        
+        # Get recent rejected orders for reason analysis
+        recent_rejected = client.table('orders').select('*').eq('status', 'REJECTED').order('created_at', desc=True).limit(10).execute()
+        
+        return {
+            'total_orders': total_orders,
+            'rejected_count': rejected_count,
+            'rejection_rate': rejection_rate,
+            'recent_rejected': recent_rejected.data
+        }
+    except Exception as e:
+        return {
+            'total_orders': 0,
+            'rejected_count': 0,
+            'rejection_rate': 0,
+            'recent_rejected': [],
+            'error': str(e)
+        }
+
 def insert_system_users():
     """
     Insert system users required for LOB matching and AMM operations.
@@ -932,6 +965,38 @@ def run_admin_app():
                 if batch_stats['total_ticks'] > 0:
                     avg_orders_per_tick = batch_stats['total_orders_processed'] / batch_stats['total_ticks']
                     st.metric("Avg Orders/Tick", f"{avg_orders_per_tick:.2f}")
+            
+            # Order Rejection Monitoring
+            st.subheader("📊 Order Rejection Monitoring")
+            rejection_stats = get_rejection_statistics()
+            
+            if 'error' in rejection_stats:
+                st.error(f"Could not load rejection statistics: {rejection_stats['error']}")
+            else:
+                col_rej1, col_rej2, col_rej3 = st.columns(3)
+                
+                with col_rej1:
+                    st.metric("Total Orders", rejection_stats['total_orders'])
+                    
+                with col_rej2:
+                    st.metric("Rejected Orders", rejection_stats['rejected_count'])
+                    
+                with col_rej3:
+                    rejection_rate = rejection_stats['rejection_rate']
+                    if rejection_rate > 10:
+                        st.metric("Rejection Rate", f"{rejection_rate:.1f}%", delta="High")
+                    elif rejection_rate > 5:
+                        st.metric("Rejection Rate", f"{rejection_rate:.1f}%", delta="Medium")
+                    else:
+                        st.metric("Rejection Rate", f"{rejection_rate:.1f}%", delta="Normal")
+                
+                # Show recent rejected orders if any
+                if rejection_stats['recent_rejected']:
+                    st.write("**Recent Rejected Orders:**")
+                    for order in rejection_stats['recent_rejected'][:5]:  # Show top 5
+                        st.write(f"• Order {order['order_id'][:8]}... - {order['side']} {order['size']} {order['outcome']} tokens ({order['created_at'][:16]})")
+                else:
+                    st.success("✅ No recent rejections - system running smoothly!")
     
     except Exception as e:
         st.error(f"Error loading batch runner status: {e}")

@@ -135,6 +135,7 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
         
         if order_type == 'LIMIT':
             # CRITICAL FIX: For limit sell orders, commit tokens + deduct gas fee per TDD Section 4.1
+            # Validate sufficient tokens BEFORE attempting to deduct
             if user_tokens < size:
                 raise ValueError(f"Insufficient tokens for limit sell commitment. Required: {size} tokens, Available: {user_tokens} tokens")
             if user_balance < gas_fee:
@@ -144,8 +145,15 @@ def submit_order(user_id: str, order_data: Dict[str, Any]) -> str:
             new_balance = float(user_balance - gas_fee)
             update_user_balance(user_id, new_balance)
             
-            # Deduct committed tokens from position
+            # Deduct committed tokens from position - only after validation passes
             from app.services.positions import update_user_position
+            # Double-check tokens are still sufficient (race condition protection)
+            current_tokens = Decimal(fetch_user_position(user_id, outcome_i, yes_no))
+            if current_tokens < size:
+                # Refund gas fee if token validation fails
+                update_user_balance(user_id, float(user_balance))
+                raise ValueError(f"Insufficient tokens after validation. Required: {size} tokens, Available: {current_tokens} tokens")
+            
             update_user_position(user_id, outcome_i, yes_no, -float(size))
             logger.info(f"Committed {size} {yes_no} tokens + {gas_fee:.4f} USDC gas fee for limit sell order")
         else:
@@ -200,7 +208,7 @@ def cancel_order(order_id: str, user_id: str) -> None:
     client = get_supabase_client()
     
     # Fetch order details - need to get from database
-    orders = fetch_user_orders(client, user_id, 'OPEN')
+    orders = fetch_user_orders(user_id, 'OPEN')
     order = None
     for o in orders:
         if o['order_id'] == order_id:
@@ -235,7 +243,7 @@ def cancel_order(order_id: str, user_id: str) -> None:
         )
         
         # Save updated engine state
-        save_engine_state(client, state)
+        save_engine_state(state)
         
         # Refund the unfilled portion to user
         if refund_amount > 0:
@@ -244,7 +252,7 @@ def cancel_order(order_id: str, user_id: str) -> None:
             update_user_balance(user_id, new_balance)
         
         # Update order status
-        update_order_status(client, order_id, 'CANCELED')
+        update_order_status(order_id, 'CANCELED')
         
         # Publish cancellation event
         publish_event('demo', 'ORDER_CANCELED', {

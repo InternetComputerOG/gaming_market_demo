@@ -925,7 +925,7 @@ for tab_index, tab in enumerate(outcome_tabs):
 st.header("💼 Your Portfolio")
 
 # Create tabs for different views
-pos_tab1, pos_tab2, pos_tab3 = st.tabs(["🏆 Filled Positions", "⏳ Open Limit Orders", "📊 Portfolio Summary"])
+pos_tab1, pos_tab2, pos_tab3, pos_tab4 = st.tabs(["🏆 Filled Positions", "⏳ Open Limit Orders", "❌ Rejected Orders", "📊 Portfolio Summary"])
 
 with pos_tab1:
     st.subheader("🏆 Your Filled Positions")
@@ -1109,6 +1109,54 @@ with pos_tab2:
         st.write("💡 **Tip:** Limit orders let you set exact prices and potentially get better deals than market orders.")
 
 with pos_tab3:
+    st.subheader("❌ Your Rejected Orders")
+    
+    # Fetch rejected orders for the user
+    try:
+        rejected_orders = fetch_user_orders(user_id, 'REJECTED')
+    except Exception as e:
+        st.error(f"Could not load rejected orders: {e}")
+        rejected_orders = []
+    
+    if rejected_orders:
+        st.write(f"**You have {len(rejected_orders)} rejected orders**")
+        
+        for i, order in enumerate(rejected_orders):
+            # Convert is_buy boolean to side string for display
+            side = "BUY" if order.get('is_buy', True) else "SELL"
+            with st.expander(f"🚫 Rejected {side} Order #{i+1} - {order['yes_no']} Token", expanded=False):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write(f"**Size:** {order['size']} tokens")
+                    st.write(f"**Type:** {order['type']}")
+                    if order.get('limit_price'):
+                        st.write(f"**Limit Price:** ${float(order['limit_price']):.3f}")
+                    st.write(f"**Submitted:** {order['created_at'][:19].replace('T', ' ')}")
+                
+                with col2:
+                    st.write(f"**Status:** {order['status']}")
+                    st.write(f"**Outcome:** {order['yes_no']}")
+                    
+                    # Show refund information
+                    if order['type'] == 'LIMIT':
+                        if order.get('is_buy', True) and order.get('limit_price'):
+                            refund_amount = float(order['size']) * float(order['limit_price'])
+                            st.success(f"💰 Refunded: ${refund_amount:.2f} USDC")
+                        elif not order.get('is_buy', True):
+                            st.success(f"💰 Refunded: {order['size']} {order['yes_no']} tokens")
+                    else:
+                        st.info("💡 Market orders only deduct gas fees")
+                
+                # Show rejection reason if available
+                st.write("**Rejection Reason:**")
+                rejection_reason = order.get('rejection_reason', 'Engine validation failed - order could not be processed')
+                st.error(rejection_reason)
+                st.write("💡 **Note:** Gas fees are not refunded, but collateral has been returned to your balance.")
+    else:
+        st.info("✅ No rejected orders! All your orders have been processed successfully.")
+
+with pos_tab4:
     st.subheader("📊 Portfolio Summary")
     
     # Get both positions and orders using fragment for live updates
