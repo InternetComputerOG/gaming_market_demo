@@ -16,6 +16,21 @@ from app.engine.state import get_binary, get_p_yes, get_p_no
 
 client = get_supabase_client()
 
+# Load and inject CSS styles
+def load_css():
+    """Load CSS file and inject it into the Streamlit app"""
+    try:
+        with open('app/static/style.css', 'r') as f:
+            css = f.read()
+        st.markdown(f'<style>{css}</style>', unsafe_allow_html=True)
+    except FileNotFoundError:
+        st.warning("CSS file not found. Styles may not display correctly.")
+    except Exception as e:
+        st.warning(f"Error loading CSS: {e}")
+
+# Load CSS at the start of the app
+load_css()
+
 # System users to filter out from leaderboards and rankings
 SYSTEM_USERS = {
     'AMM System',
@@ -117,14 +132,20 @@ def price_fragment(outcome_i):
 # Fragment for portfolio data - updates at batch interval
 @st.fragment(run_every=batch_interval_s)
 def portfolio_fragment(user_id):
+    """Fragment that fetches portfolio data with hybrid caching strategy.
+    
+    Uses manual caching that can be cleared for immediate updates after user actions,
+    while still allowing automatic refresh every batch_interval_s.
+    """
     # Check if we have cached data and it's recent
     cache_key = f'portfolio_cache_{user_id}'
     current_time = time.time()
     
-    # Always refresh if cache is older than batch interval to catch fills/ticks
+    # Return cached data if it's fresh (within batch interval)
+    # Use <= to ensure cache expires exactly at batch_interval_s, preventing timing conflicts
     if (cache_key in st.session_state and 
         'timestamp' in st.session_state[cache_key] and 
-        current_time - st.session_state[cache_key]['timestamp'] < batch_interval_s):
+        current_time - st.session_state[cache_key]['timestamp'] <= batch_interval_s * 0.9):
         return st.session_state[cache_key]['data']
     
     try:
@@ -138,7 +159,7 @@ def portfolio_fragment(user_id):
             'error': None
         }
         
-        # Cache the result
+        # Cache the result with timestamp
         st.session_state[cache_key] = {
             'data': result,
             'timestamp': current_time
@@ -168,14 +189,10 @@ def get_current_prices(outcome_i, mr_enabled=None):
         if mr_enabled is None:
             mr_enabled = False  # Conservative default
         
-        if mr_enabled:
-            # Use standard get_p_yes which includes virtual_yes
-            current_p_yes = get_p_yes(binary)
-        else:
-            # Calculate price without virtual_yes component
-            q_yes = binary.get('q_yes', 0)
-            L_i = binary.get('L_i', 1)  # Avoid division by zero
-            current_p_yes = float(q_yes / L_i) if L_i > 0 else 0.5
+        # Always use proper TDD price calculation including virtual_yes component
+        # The TDD specifies p_yes = (q_yes + virtual_yes) / L regardless of mr_enabled
+        # mr_enabled only affects whether multi-resolution logic is active, not price calculation
+        current_p_yes = get_p_yes(binary)
         
         current_p_no = get_p_no(binary)  # NO prices don't use virtual_yes
         return current_p_yes, current_p_no
@@ -198,9 +215,13 @@ def waiting_room_status_fragment():
         st.session_state.status_check_count += 1
         st.session_state.last_status_check = time.time()
         
-        # If status changed from DRAFT, trigger transition
-        if current_status != 'DRAFT':
+        # Handle status transitions appropriately
+        if current_status == 'RUNNING' or current_status == 'FROZEN':
             st.success("🚀 Demo is starting! Redirecting to trading interface...")
+            time.sleep(1)  # Brief pause for user to see the message
+            st.rerun()
+        elif current_status == 'RESOLVED':
+            st.success("🏁 Demo has completed! Redirecting to results...")
             time.sleep(1)  # Brief pause for user to see the message
             st.rerun()
         
@@ -403,9 +424,10 @@ def balance_fragment():
     cache_key = f'balance_cache_{user_id}'
     current_time = time.time()
     
+    # Use 90% of batch_interval_s to prevent timing conflicts with fragment scheduler
     if (cache_key in st.session_state and 
         'timestamp' in st.session_state[cache_key] and 
-        current_time - st.session_state[cache_key]['timestamp'] < batch_interval_s):
+        current_time - st.session_state[cache_key]['timestamp'] <= batch_interval_s * 0.9):
         cached_balance = st.session_state[cache_key]['data']
         st.metric("Balance", f"${cached_balance:.2f}")
         return cached_balance
@@ -584,7 +606,7 @@ for tab_index, tab in enumerate(outcome_tabs):
             if order_type == 'LIMIT':
                 limit_price_input = st.number_input("Limit Price", min_value=0.0, max_value=1.0, step=0.01, value=0.5, key=f"limit_price_{outcome_i}")
             else:
-                max_slippage_input = st.number_input("Max Slippage %", min_value=0.0, value=5.0, key=f"max_slippage_{outcome_i}") / 100
+                max_slippage_input = st.number_input("Max Slippage %", min_value=0.0, value=25.0, key=f"max_slippage_{outcome_i}") / 100
             af_opt_in = st.checkbox("Auto-Fill Opt-In", value=True, key=f"af_opt_in_{outcome_i}") if params['af_enabled'] else False
 
             try:
@@ -654,11 +676,13 @@ for tab_index, tab in enumerate(outcome_tabs):
                     
                     # Market order specific info
                     if order_type == 'MARKET':
-                        st.write(f"**Estimated Slippage:** {float(est['estimated_slippage'])*100:.2f}%")
                         if est['would_reject']:
                             st.error("⚠️ Estimated slippage exceeds or equals maximum allowed")
                         elif 'error' in est and est['error']:
                             st.warning(f"⚠️ Estimation note: {est['error']}")
+                        else:
+                            # Only show estimated slippage percentage when there's no warning
+                            st.write(f"**Estimated Slippage:** {float(est['estimated_slippage'])*100:.2f}%")
                     
                     # Potential Returns Analysis
                     st.subheader("🎯 Potential Returns")
@@ -1268,121 +1292,131 @@ with metric_col2:
 with metric_col3:
     st.metric("Open Capital", f"${metrics['total_open_capital']:.2f}")
     
-    with metric_col4:
-        # USD Portfolio Value = Balance + Token Holdings at Current Price
-        total_portfolio_value = metrics['current_balance'] + metrics['token_holdings_value']
-        st.metric("USD Portfolio Value", f"${total_portfolio_value:.2f}")
+with metric_col4:
+    # USD Portfolio Value = Balance + Token Holdings at Current Price
+    total_portfolio_value = metrics['current_balance'] + metrics['token_holdings_value']
+    st.metric("USD Portfolio Value", f"${total_portfolio_value:.2f}")
+
+with metric_col5:
+    st.metric("Gas Spent", f"${metrics['total_gas_spent']:.2f}")
+
+# Advanced Metrics (TDD Components) - OUTSIDE of fragments and columns for full width
+if metrics['total_open_capital'] > 0 or metrics['estimated_seigniorage_benefit'] > 0:
+    st.write("---")
+    st.write("**📈 Advanced Metrics (TDD Components)**")
     
-    with metric_col5:
-        st.metric("Gas Spent", f"${metrics['total_gas_spent']:.2f}")
+    # Display as full-width content instead of constrained columns
+    if metrics['open_capital_breakdown']:
+        st.write("**Open Capital by Outcome:**")
+        for outcome_name, capital in metrics['open_capital_breakdown'].items():
+            st.write(f"• {outcome_name}: ${capital:.2f}")
     
-    # Additional TDD-required metrics display
-    if metrics['total_open_capital'] > 0 or metrics['estimated_seigniorage_benefit'] > 0:
-        st.write("---")
-        st.write("**📈 Advanced Metrics (TDD Components)**")
-        
-        adv_col1, adv_col2, adv_col3 = st.columns(3)
+    # Display seigniorage and order metrics in a 2-column layout for better use of space
+    if metrics['estimated_seigniorage_benefit'] > 0 or metrics['total_orders_submitted'] > 0:
+        adv_col1, adv_col2 = st.columns(2)
         
         with adv_col1:
-            if metrics['open_capital_breakdown']:
-                st.write("**Open Capital by Outcome:**")
-                for outcome_name, capital in metrics['open_capital_breakdown'].items():
-                    st.write(f"• {outcome_name}: ${capital:.2f}")
-        
-        with adv_col2:
             if metrics['estimated_seigniorage_benefit'] > 0:
                 st.metric("Est. Seigniorage Benefit", f"${metrics['estimated_seigniorage_benefit']:.2f}")
                 st.caption("Estimated benefit from auto-fill seigniorage")
         
-        with adv_col3:
-            st.metric("Total Orders Submitted", metrics['total_orders_submitted'])
-            st.caption(f"Gas rate: ${metrics['total_gas_spent']/max(1, metrics['total_orders_submitted']):.4f}/order")
+        with adv_col2:
+            if metrics['total_orders_submitted'] > 0:
+                st.metric("Total Orders Submitted", metrics['total_orders_submitted'])
+                st.caption(f"Gas rate: ${metrics['total_gas_spent']/max(1, metrics['total_orders_submitted']):.4f}/order")
 
-    # Per-Outcome Potential Payouts Table
-    st.write("---")
-    st.write("**💰 Potential Payouts by Outcome**")
+# Per-Outcome Potential Payouts Table - OUTSIDE of fragments and columns for full width
+st.write("---")
+st.write("**💰 Potential Payouts by Outcome**")
+
+# Group positions by outcome
+outcome_positions = {}
+for p in positions:
+    if float(p['tokens']) > 0:
+        outcome_i = int(p['outcome_i'])
+        if outcome_i not in outcome_positions:
+            outcome_positions[outcome_i] = {'YES': 0, 'NO': 0}
+        outcome_positions[outcome_i][p['yes_no']] += float(p['tokens'])
+
+if outcome_positions:
+    # Create payout table
+    payout_data = []
     
-    # Group positions by outcome
-    outcome_positions = {}
-    for p in positions:
-        if float(p['tokens']) > 0:
-            outcome_i = int(p['outcome_i'])
-            if outcome_i not in outcome_positions:
-                outcome_positions[outcome_i] = {'YES': 0, 'NO': 0}
-            outcome_positions[outcome_i][p['yes_no']] += float(p['tokens'])
+    # Get outcome names from config
+    try:
+        config = load_config()
+        outcome_names = config.get('params', {}).get('outcome_names', [])
+    except:
+        outcome_names = []
     
-    if outcome_positions:
-        # Create payout table
-        payout_data = []
+    for outcome_i in sorted(outcome_positions.keys()):
+        # Get outcome name
+        if outcome_i < len(outcome_names):
+            outcome_name = outcome_names[outcome_i]
+        else:
+            outcome_name = f"Outcome {outcome_i + 1}"
         
-        # Get outcome names from config
+        yes_tokens = outcome_positions[outcome_i]['YES']
+        no_tokens = outcome_positions[outcome_i]['NO']
+        
+        # Calculate winnings if this outcome wins
+        # If outcome i wins: YES tokens pay $1 each, NO tokens pay $0
+        # If outcome i loses: YES tokens pay $0, NO tokens pay $1 each
+        
+        if_wins_winnings = yes_tokens * 1.0 + no_tokens * 0.0  # YES pays $1, NO pays $0
+        if_loses_winnings = yes_tokens * 0.0 + no_tokens * 1.0  # YES pays $0, NO pays $1
+        
+        # Calculate P/L (Profit/Loss) = Winnings - Capital Committed
+        # For P/L calculation, we need to estimate what was paid for these tokens
+        # Since we don't track cost basis, use current market value as approximation
         try:
-            config = load_config()
-            outcome_names = config.get('params', {}).get('outcome_names', [])
-        except:
-            outcome_names = []
-        
-        for outcome_i in sorted(outcome_positions.keys()):
-            # Get outcome name
-            if outcome_i < len(outcome_names):
-                outcome_name = outcome_names[outcome_i]
+            # Use conservative default for mr_enabled to avoid config loading in fragments
+            current_p_yes, current_p_no = get_current_prices(outcome_i, False)
+            if current_p_yes is not None and current_p_no is not None:
+                estimated_cost = yes_tokens * current_p_yes + no_tokens * current_p_no
             else:
-                outcome_name = f"Outcome {outcome_i + 1}"
-            
-            yes_tokens = outcome_positions[outcome_i]['YES']
-            no_tokens = outcome_positions[outcome_i]['NO']
-            
-            # Calculate winnings if this outcome wins
-            # If outcome i wins: YES tokens pay $1 each, NO tokens pay $0
-            # If outcome i loses: YES tokens pay $0, NO tokens pay $1 each
-            
-            if_wins_winnings = yes_tokens * 1.0 + no_tokens * 0.0  # YES pays $1, NO pays $0
-            if_loses_winnings = yes_tokens * 0.0 + no_tokens * 1.0  # YES pays $0, NO pays $1
-            
-            # Calculate P/L (Profit/Loss) = Winnings - Capital Committed
-            # For P/L calculation, we need to estimate what was paid for these tokens
-            # Since we don't track cost basis, use current market value as approximation
-            try:
-                # Use conservative default for mr_enabled to avoid config loading in fragments
-                current_p_yes, current_p_no = get_current_prices(outcome_i, False)
-                if current_p_yes is not None and current_p_no is not None:
-                    estimated_cost = yes_tokens * current_p_yes + no_tokens * current_p_no
-                else:
-                    estimated_cost = (yes_tokens + no_tokens) * 0.5
-            except:
                 estimated_cost = (yes_tokens + no_tokens) * 0.5
-            
-            if_wins_pl = if_wins_winnings - estimated_cost
-            if_loses_pl = if_loses_winnings - estimated_cost
-            
-            # Add row for "if this outcome wins"
+        except:
+            estimated_cost = (yes_tokens + no_tokens) * 0.5
+        
+        if_wins_pl = if_wins_winnings - estimated_cost
+        if_loses_pl = if_loses_winnings - estimated_cost
+        
+        # Add row for "if this outcome wins"
+        payout_data.append({
+            'Outcome': f"{outcome_name} WINS",
+            'YES Tokens': f"{yes_tokens:.2f}",
+            'NO Tokens': f"{no_tokens:.2f}",
+            'Winnings': f"${if_wins_winnings:.2f}",
+            'P/L': f"${if_wins_pl:+.2f}"
+        })
+        
+        # Add row for "if this outcome loses" (only if user has NO tokens that would pay out)
+        if if_loses_winnings > 0:
             payout_data.append({
-                'Outcome': f"{outcome_name} WINS",
+                'Outcome': f"{outcome_name} LOSES",
                 'YES Tokens': f"{yes_tokens:.2f}",
                 'NO Tokens': f"{no_tokens:.2f}",
-                'Winnings': f"${if_wins_winnings:.2f}",
-                'P/L': f"${if_wins_pl:+.2f}"
+                'Winnings': f"${if_loses_winnings:.2f}",
+                'P/L': f"${if_loses_pl:+.2f}"
             })
-            
-            # Add row for "if this outcome loses" (only if user has NO tokens that would pay out)
-            if if_loses_winnings > 0:
-                payout_data.append({
-                    'Outcome': f"{outcome_name} LOSES",
-                    'YES Tokens': f"{yes_tokens:.2f}",
-                    'NO Tokens': f"{no_tokens:.2f}",
-                    'Winnings': f"${if_loses_winnings:.2f}",
-                    'P/L': f"${if_loses_pl:+.2f}"
-                })
+    
+    if payout_data:
+        # Display as full-width table - NOW OUTSIDE of any column constraints
+        import pandas as pd
+        df = pd.DataFrame(payout_data)
         
-        if payout_data:
-            # Display as table
-            import pandas as pd
-            df = pd.DataFrame(payout_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No active positions to display payouts for.")
+        # Use explicit container and styling for maximum width
+        st.dataframe(
+            df, 
+            use_container_width=True, 
+            hide_index=True,
+            height=None  # Let it auto-size based on content
+        )
     else:
         st.info("No active positions to display payouts for.")
+else:
+    st.info("No active positions to display payouts for.")
 
 # Recent Trades Section - moved to bottom of page
 st.header("📈 Recent Trades")
@@ -1395,9 +1429,10 @@ def recent_trades_fragment():
     cache_key = 'trades_cache'
     current_time = time.time()
     
+    # Use 90% of batch_interval_s to prevent timing conflicts with fragment scheduler
     if (cache_key in st.session_state and 
         'timestamp' in st.session_state[cache_key] and 
-        current_time - st.session_state[cache_key]['timestamp'] < batch_interval_s):
+        current_time - st.session_state[cache_key]['timestamp'] <= batch_interval_s * 0.9):
         return st.session_state[cache_key]['data']
     
     try:

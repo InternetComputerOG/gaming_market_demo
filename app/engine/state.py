@@ -89,13 +89,25 @@ def get_p_yes(binary: BinaryState) -> float:
     """
     Compute p_yes for a binary.
     """
-    return float((Decimal(str(binary['q_yes'])) + Decimal(str(binary['virtual_yes']))) / Decimal(str(binary['L'])))
+    L = Decimal(str(binary['L']))
+    if L <= 0:
+        return 0.0  # Handle division by zero case
+    
+    q_yes = Decimal(str(binary['q_yes']))
+    virtual_yes = Decimal(str(binary.get('virtual_yes', 0.0)))  # Default to 0 if missing
+    
+    return float((q_yes + virtual_yes) / L)
 
 def get_p_no(binary: BinaryState) -> float:
     """
     Compute p_no for a binary.
     """
-    return float(Decimal(str(binary['q_no'])) / Decimal(str(binary['L'])))
+    L = Decimal(str(binary['L']))
+    if L <= 0:
+        return 0.0  # Handle division by zero case
+    
+    q_no = Decimal(str(binary['q_no']))
+    return float(q_no / L)
 
 def update_subsidies(state: EngineState, params: Dict[str, Any]) -> None:
     """

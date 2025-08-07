@@ -104,8 +104,14 @@ def reset_demo_state():
                     
                     # Try bulk delete first (more efficient)
                     try:
+                        # Use appropriate impossible value based on field type
+                        if id_field == 'tick_id':  # INTEGER field
+                            impossible_value = -999999
+                        else:  # UUID fields - use impossible UUID that doesn't conflict with system users
+                            impossible_value = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+                        
                         # Use a condition that matches all records
-                        result = client.table(table_name).delete().neq(id_field, 'impossible-uuid-that-never-exists').execute()
+                        result = client.table(table_name).delete().neq(id_field, impossible_value).execute()
                         st.success(f"✅ {table_name} cleared via bulk delete")
                     except Exception as bulk_error:
                         st.warning(f"Bulk delete failed for {table_name}, trying individual deletion: {bulk_error}")
@@ -543,7 +549,9 @@ def run_admin_app():
                                     st.error(f"Final winner must be between 0 and {params['n_outcomes'] - 1}")
                                     params['elim_outcomes'] = 0
                             else:
-                                st.error("Single resolution elim_outcomes must be an integer (final winner index)")
+                                # Only show error if the parsed value is not the expected type AND not empty/default
+                                if parsed_elim != [] and parsed_elim != 0:
+                                    st.error("Single resolution elim_outcomes must be an integer (final winner index)")
                                 params['elim_outcomes'] = 0
                     else:
                         params['elim_outcomes'] = [] if params['mr_enabled'] else 0
@@ -648,14 +656,14 @@ def run_admin_app():
                     start_ts = get_current_ms()
                     st.info(f"Starting demo with timestamp: {start_ts}")
                     
-                    # Fix parameter nesting issue - store timing at top level for timer_service compatibility
+                    # Store start_ts_ms in params for timer_service compatibility
                     params_with_timing = params.copy()
                     params_with_timing['current_round'] = 0
+                    params_with_timing['start_ts_ms'] = start_ts  # Fresh timestamp in params
                     
                     update_config({
                         'params': params_with_timing,
                         'status': 'RUNNING', 
-                        'start_ts_ms': start_ts,  # Top-level for timer_service.py compatibility
                         'current_round': 0
                     })
                     
@@ -756,7 +764,7 @@ def run_admin_app():
         current_round = config.get('current_round', 0)
         if st.button("Trigger Next Resolution") and status == 'FROZEN' and current_round < len(params['elim_outcomes']):
             elims = params['elim_outcomes'][current_round]
-            trigger_resolution_service(is_final=False, elim_outcomes=elims, current_time=(get_current_ms() - config['start_ts_ms']) // 1000)
+            trigger_resolution_service(is_final=False, elim_outcomes=elims, current_time=(get_current_ms() - config['params'].get('start_ts_ms', 0)) // 1000)
             publish_resolution_update(is_final=False, elim_outcomes=elims)
             st.success("Resolution triggered.")
 

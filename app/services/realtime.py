@@ -32,13 +32,21 @@ def make_tick_payload(tick_id: int) -> Dict[str, Any]:
     # Serialize state summary
     state_summary = serialize_state(state)
     
-    # Compute prices per binary
+    # Compute prices per binary - using TDD formula: p_yes = (q_yes + virtual_yes) / L
     prices = {}
     for binary in state['binaries']:
         outcome_i = binary['outcome_i']
+        # Use proper TDD price calculation including virtual_yes component
+        if binary['L'] > 0:
+            p_yes = (binary['q_yes'] + binary.get('virtual_yes', 0.0)) / binary['L']
+            p_no = binary['q_no'] / binary['L']
+        else:
+            p_yes = 0.0
+            p_no = 0.0
+        
         prices[outcome_i] = {
-            'p_yes': binary['q_yes'] / binary['L'] if binary['L'] > 0 else 0.0,
-            'p_no': binary['q_no'] / binary['L'] if binary['L'] > 0 else 0.0
+            'p_yes': p_yes,
+            'p_no': p_no
         }
     
     # Placeholder for volumes, stats (fetch or compute as needed; keep simple)

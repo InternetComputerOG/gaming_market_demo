@@ -56,7 +56,7 @@ def update_config(config_data: Dict[str, Any]) -> None:
                 try:
                     existing_config = load_config()
                     existing_params = existing_config.get('params', {})
-                    # Merge existing params with new params
+                    # Merge existing params with new params (new params override existing)
                     merged_params = {**existing_params, **value}
                     update_data['params'] = merged_params
                 except:

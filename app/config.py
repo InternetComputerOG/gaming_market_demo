@@ -50,7 +50,7 @@ class EngineParams(TypedDict):
     final_winner: int
     res_offsets: list[int]
     freeze_durs: list[int]
-    elim_outcomes: list[list[int]]
+    elim_outcomes: list[list[int]] | int
     starting_balance: float
     gas_fee: float
     batch_interval_ms: int
@@ -90,7 +90,7 @@ def get_default_engine_params() -> EngineParams:
         final_winner=0,
         res_offsets=[],
         freeze_durs=[],
-        elim_outcomes=[],
+        elim_outcomes=0,
         starting_balance=1000.0,
         gas_fee=0.00,
         batch_interval_ms=5000,

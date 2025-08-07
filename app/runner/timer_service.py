@@ -13,15 +13,14 @@ def start_timer_service() -> None:
     Starts the timer service by setting the start timestamp if not set and launching the monitor thread.
     """
     config = load_config()
-    # Check if start_ts_ms exists in params (not top-level config)
+    # Check if start_ts_ms exists in top-level config or params
     params = config.get('params', {})
-    if 'start_ts_ms' not in params:
+    if 'start_ts_ms' not in config and 'start_ts_ms' not in params:
         start_ts_ms = get_current_ms()
-        # Store start_ts_ms and current_round in params, not as top-level keys
+        # Store start_ts_ms in params for consistency with monitor_loop
         config_update = {
-            'start_ts_ms': start_ts_ms,  # This will be converted to start_ts column
-            'status': 'RUNNING', 
-            'params': {'start_ts_ms': start_ts_ms, 'current_round': 0}
+            'params': {'start_ts_ms': start_ts_ms, 'current_round': 0},
+            'status': 'RUNNING'
         }
         update_config(config_update)
 
@@ -40,7 +39,7 @@ def monitor_loop() -> None:
         # Get parameters from config['params'] with fallbacks
         params = config.get('params', {})
         
-        # Get start_ts_ms from params since it's stored there now
+        # Get start_ts_ms from params (where admin stores it)
         start_ts_ms: int = params.get('start_ts_ms', 0)
         current_ms = get_current_ms()
         elapsed_ms: int = current_ms - start_ts_ms
@@ -68,10 +67,10 @@ def monitor_loop() -> None:
                     print(f"Freezing trading for resolution round {current_round} at elapsed {elapsed_ms} ms.")
 
                     elim_outcomes: Union[list[int], int]
-                    elim_outcomes = config['elim_outcomes'][current_round]
+                    elim_outcomes = params.get('elim_outcomes', [])[current_round] if isinstance(params.get('elim_outcomes', []), list) else 0
                     is_final: bool = (current_round == len(res_offsets) - 1)
                     if is_final:
-                        elim_outcomes = config['final_winner']
+                        elim_outcomes = params.get('final_winner', 0)
 
                     # Trigger resolution
                     trigger_resolution_service(is_final, elim_outcomes, elapsed_ms)
