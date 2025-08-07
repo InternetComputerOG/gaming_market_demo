@@ -4,12 +4,33 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 
 def load_env() -> dict[str, str]:
+    # Try to load from .env file (for local development)
     load_dotenv()
+    
     required_vars = ['ADMIN_PASSWORD', 'SUPABASE_URL', 'SUPABASE_SERVICE_KEY', 'DATABASE_URL']
-    env_vars = {key: os.getenv(key) for key in required_vars}
-    for key, value in env_vars.items():
+    env_vars = {}
+    
+    for key in required_vars:
+        # First try environment variables (works locally and on cloud)
+        value = os.getenv(key)
+        
+        # If not found, try Streamlit secrets (for Streamlit Community Cloud)
         if value is None:
-            raise ValueError(f"Missing required environment variable: {key}")
+            try:
+                import streamlit as st
+                if hasattr(st, 'secrets') and key in st.secrets:
+                    value = st.secrets[key]
+            except ImportError:
+                # streamlit not available, continue with None
+                pass
+        
+        env_vars[key] = value
+        
+        # Only raise error if we still don't have the value
+        if value is None:
+            raise ValueError(f"Missing required environment variable or secret: {key}. "
+                           f"Please set it as an environment variable or add it to Streamlit secrets.")
+    
     return env_vars
 
 def get_supabase_client() -> Client:
