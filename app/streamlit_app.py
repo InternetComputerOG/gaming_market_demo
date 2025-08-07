@@ -734,6 +734,13 @@ for tab_index, tab in enumerate(outcome_tabs):
             disable_submit = est['would_reject'] if 'est' in locals() else True
             if st.button("Submit Order", disabled=disable_submit, key=f"submit-order-button-{outcome_i}"):
                 try:
+                    # Add 1% buffer to max_slippage to prevent precision mismatch rejections
+                    # between UI estimation and engine calculation
+                    buffered_max_slippage = None
+                    if max_slippage_input is not None:
+                        # Add 1% (0.01) buffer to account for calculation precision differences
+                        buffered_max_slippage = price_value(max_slippage_input + 0.01)
+                    
                     order_data = {
                         'outcome_i': outcome_i,
                         'yes_no': yes_no,
@@ -741,7 +748,7 @@ for tab_index, tab in enumerate(outcome_tabs):
                         'is_buy': is_buy,
                         'size': size,
                         'limit_price': price_value(limit_price_input) if limit_price_input is not None else None,
-                        'max_slippage': price_value(max_slippage_input) if max_slippage_input is not None else None,
+                        'max_slippage': buffered_max_slippage,
                         'af_opt_in': af_opt_in,
                         'ts_ms': get_current_ms()
                     }
@@ -765,8 +772,11 @@ for tab_index, tab in enumerate(outcome_tabs):
                     
                     # Force immediate page refresh to show updated portfolio and trades
                     st.rerun()
-                except ValueError as e:
+                except Exception as e:
                     st.error(f"❌ Order submission failed: {str(e)}")
+                    # Log the full exception for debugging
+                    import traceback
+                    st.error(f"Debug info: {traceback.format_exc()}")
 
         with col2:
             st.header("📊 Order Book")

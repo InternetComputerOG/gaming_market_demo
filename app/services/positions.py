@@ -101,34 +101,9 @@ def update_position_from_fill(fill: Dict[str, Any], state: EngineState) -> None:
             seller_new_balance = seller_balance + seller_proceeds
             update_user_balance(sell_user_id, float(seller_new_balance))
         
-        # Update engine state token quantities per TDD requirements
-        # Cross-matches update both q_yes and q_no (TDD Line 175: "Update q_yes_i += Δ, q_no_i += Δ")
-        # AMM/LOB/auto-fills update only one q (either q_yes OR q_no)
-        binary = get_binary(state, outcome_i)
-        
-        # Determine fill type - check for cross-match indicators
-        fill_type = fill.get('fill_type', 'UNKNOWN')
-        
-        # If no explicit fill_type, infer from fill structure
-        if fill_type == 'UNKNOWN':
-            if 'price_yes' in fill and 'price_no' in fill:
-                fill_type = 'CROSS_MATCH'
-            elif buy_user_id == '00000000-0000-0000-0000-000000000000' or sell_user_id == '00000000-0000-0000-0000-000000000000':
-                fill_type = 'AMM'
-            else:
-                fill_type = 'LOB_MATCH'
-        
-        # Update q_yes/q_no based on fill type
-        if fill_type == 'CROSS_MATCH':
-            # Cross-matches: Update both q_yes and q_no
-            binary['q_yes'] = float(Decimal(str(binary['q_yes'])) + size)
-            binary['q_no'] = float(Decimal(str(binary['q_no'])) + size)
-        else:
-            # AMM/LOB/auto-fills: Update only the relevant q
-            if yes_no == 'YES':
-                binary['q_yes'] = float(Decimal(str(binary['q_yes'])) + size)
-            else:
-                binary['q_no'] = float(Decimal(str(binary['q_no'])) + size)
+        # NOTE: Engine state token quantities (q_yes, q_no) are already correctly updated by apply_orders()
+        # This function should only handle user positions and balances to avoid double-counting
+        # The redundant engine state updates have been removed to fix the double-counting bug
         
         # Note: Solvency validation moved to batch-level processing to avoid rejecting legitimate fills
         # Individual fills may temporarily violate solvency during batch processing

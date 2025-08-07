@@ -26,7 +26,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* Additional fallback selector */
-.stMetric .metric-value {
+.stMetric div[data-testid="stMetricValue"] {
     font-size: 1.125rem !important;
 }
 

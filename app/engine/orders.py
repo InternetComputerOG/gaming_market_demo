@@ -250,25 +250,33 @@ def apply_orders(
         # Compute new price after impact (penalty already applied in AMM cost functions)
         new_p_yes, new_p_no = get_new_prices_after_impact(binary, remaining, X, f_i, is_buy, is_yes)
         effective_p = new_p_yes if is_yes else new_p_no
-        # Compute slippage
+        
+        # Apply AMM fee based on AMM cost X (per TDD specification)
+        # Fee = f * X, not f * remaining * effective_p
+        fee = Decimal(params_dyn['f']) * X
+        
+        # CRITICAL FIX: Compute slippage based on user's average cost, not final token price
+        # This matches TDD specification and provides accurate slippage estimates
         if is_buy:
-            slippage = safe_divide(effective_p - current_p, current_p)
+            user_avg_cost = safe_divide(X + fee, remaining)  # Total cost per token
+            slippage = safe_divide(user_avg_cost - current_p, current_p)
         else:
-            slippage = safe_divide(current_p - effective_p, current_p)
+            user_avg_received = safe_divide(X - fee, remaining)  # Net received per token
+            slippage = safe_divide(current_p - user_avg_received, current_p)
         if order['max_slippage'] is not None and slippage > Decimal(order['max_slippage']):
             events.append({'type': 'ORDER_REJECTED', 'payload': {'order_id': order['order_id'], 'reason': 'max slippage exceeded'}})
             continue
-        # Apply AMM fee (on trade value) - consistent with LOB fee transparency
-        # AMM fees are separate from execution prices, maintaining user experience consistency
-        fee = Decimal(params_dyn['f']) * remaining * effective_p
         # Create AMM fill
+        # CRITICAL FIX: Use AMM cost per token (X/remaining) as fill price, not final pool token price
+        # This ensures fill price represents user's actual cost per token per TDD specification
+        amm_cost_per_token = safe_divide(X, remaining)
         fill: Fill = {
             'trade_id': str(uuid.uuid4()),  # Generate proper UUID for database compatibility
             'buy_user_id': order['user_id'] if is_buy else AMM_USER_ID,
             'sell_user_id': AMM_USER_ID if is_buy else order['user_id'],
             'outcome_i': i,
             'yes_no': order['yes_no'],
-            'price': price_value(effective_p),
+            'price': price_value(amm_cost_per_token),
             'size': usdc_amount(remaining),
             'fee': usdc_amount(fee),
             'tick_id': 0,  # Placeholder
