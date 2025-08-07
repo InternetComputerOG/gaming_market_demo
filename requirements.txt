@@ -2,6 +2,7 @@ matplotlib
 mpmath
 numpy
 pandas
+python-dotenv
 pytest
 streamlit
 supabase
